@@ -207,10 +207,12 @@ Item {
     loginUrl = scenario === "login" ? "https://production.tuple.app/start?code_challenge=demo&os=linux" : ""
     loginPending = scenario === "login"
     contacts = Model.parseContacts(
-      "  101 Alice Smith <alice@example.com> [online] (favorite)\n"
+      "  101 Alice Smith <alice@example.com> [available] (favorite)\n"
       + "  102 Bob Jones <bob@example.com> [offline] (favorite)\n"
-      + "  103 Carol Diaz <carol@example.com> [online]\n"
-      + "  104 Dev Patel <dev@example.com> [offline]\n")
+      + "  103 Carol Diaz <carol@example.com> [in call] (favorite)\n"
+      + "  104 Dev Patel <dev@example.com> [available] (favorite)\n"
+      + "  105 Erin Park <erin@example.com> [unavailable] (favorite)\n"
+      + "  106 Femi Ade <femi@example.com> [offline]\n")
     contactsLoaded = true
     contactCounts = Model.contactCounts(contacts)
     tupleSettings = Model.parseSettings(

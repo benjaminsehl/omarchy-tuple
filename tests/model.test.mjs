@@ -74,6 +74,9 @@ test("contacts + call choices (format from binary strings)", () => {
   assert.equal(M.choiceForContact(choices, c[0]).index, 1)
   assert.equal(M.choiceForContact(choices, c[1]), null)
   assert.equal(M.initials("Alice Smith"), "AS")
+  assert.equal(M.presenceLabel("available"), "")
+  assert.equal(M.presenceLabel("in call"), "In a call")
+  assert.equal(M.presenceLabel("offline"), "Offline")
 })
 
 test("reduceLog: real startup log", () => {
@@ -148,7 +151,7 @@ test("large directories: featured + search stay bounded", () => {
   assert.ok(Date.now() - t0 < 500, "parse 8k rows quickly")
   assert.equal(all.length, 8003)
   const featured = M.featuredContacts(all, 30)
-  assert.deepEqual([...featured.map((c) => c.name)], ["Zed Fave", "Amy Here"])
+  assert.deepEqual([...featured.map((c) => c.name)], ["Amy Here", "Zed Fave"])
   assert.equal(M.searchContacts(all, "person 12", 30).length, 30)
   assert.equal(M.searchContacts(all, "uma", 30)[0].name, "Uma Busy")
   assert.equal(M.searchContacts(all, "", 30).length, 2)

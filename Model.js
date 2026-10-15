@@ -112,12 +112,21 @@ function parseContacts(text) {
       favorite: /favorite/i.test(m[5])
     })
   }
+  // Reachable people first, then favorites, then alphabetical.
   out.sort(function(a, b) {
-    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1
     if (a.online !== b.online) return a.online ? -1 : 1
+    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1
     return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : (a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0)
   })
   return out
+}
+
+// Words only when they add information beyond the presence dot.
+function presenceLabel(status) {
+  var s = String(status || "").trim().toLowerCase()
+  if (s === "" || s === "available" || s === "online") return ""
+  if (s === "in call") return "In a call"
+  return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
 function isOnlineStatus(status) {

@@ -7,6 +7,12 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
+// Design notes — "as little design as possible":
+//   * The hero states where you are; sections don't restate it.
+//   * One control per intent: a single field+button starts or joins a call.
+//   * Presence is shown once (the dot); words only when they add something.
+//   * Secondary actions (favorite, call) appear on the row you're pointing at.
+//   * Keyboard shortcuts exist but aren't printed; see README / tooltips.
 Panel {
   id: root
   moduleName: "sehl.tuple"
@@ -28,7 +34,7 @@ Panel {
     return barForeground
   }
 
-  // ── Keyboard cursor ───────────────────────────────────────────────────
+  // ── State ─────────────────────────────────────────────────────────────
   property bool cursorActive: false
   property string cursorKey: "daemon"
   property bool settingsOpen: false
@@ -36,9 +42,13 @@ Panel {
   property string joinText: ""
   property string contactQuery: ""
   readonly property int contactLimit: 40
+  readonly property bool joinable: Model.extractCallUrl(joinText) !== ""
+  readonly property bool showPair: tuple.loggedIn && !tuple.inCall && !tuple.incoming
   // Never bind a Repeater to the full directory (orgs have thousands of
-  // people); show favorites + available, or the top search matches.
+  // people); show available + favorites, or the top search matches.
   readonly property var shownContacts: Model.searchContacts(tuple.contacts, contactQuery, contactLimit)
+  readonly property var footerKeys: ["settings", "debug", "logout"]
+  readonly property var tileKeys: ["answer", "decline", "mute", "share", "copyLink", "end"]
 
   readonly property var navKeys: {
     var keys = []
@@ -55,17 +65,12 @@ Panel {
       keys.push("mute"); keys.push("share")
       if (tuple.personalUrl !== "") keys.push("copyLink")
       keys.push("end")
-    } else if (!tuple.incoming) {
-      keys.push("new")
-      if (tuple.clipboardCallUrl !== "") keys.push("joinClipboard")
-      keys.push("join")
     }
-    if (tuple.contacts.length > 0) keys.push("search")
+    if (showPair) keys.push("pair")
+    if (searchField.visible) keys.push("search")
     for (var i = 0; i < shownContacts.length; i++) keys.push("contact:" + shownContacts[i].id)
-    keys.push("settings")
     if (settingsOpen) for (var j = 0; j < tuple.tupleSettings.length; j++) keys.push("setting:" + tuple.tupleSettings[j].name)
-    keys.push("debug")
-    keys.push("logout")
+    keys.push("settings"); keys.push("debug"); keys.push("logout")
     return keys
   }
 
@@ -73,12 +78,16 @@ Panel {
   function hover(key) { cursorActive = true; cursorKey = key }
 
   function moveCursor(dx, dy) {
-    if (dx !== 0 && (cursorKey === "mute" || cursorKey === "share" || cursorKey === "copyLink" || cursorKey === "end"
-        || cursorKey === "answer" || cursorKey === "decline" || cursorKey === "debug" || cursorKey === "logout")) dy = dx
+    var horizontal = footerKeys.indexOf(cursorKey) !== -1 || tileKeys.indexOf(cursorKey) !== -1
+    if (dx !== 0 && horizontal) dy = dx
     if (dy === 0) return
     var i = navKeys.indexOf(cursorKey)
-    if (i === -1) i = 0
-    else i = Math.max(0, Math.min(navKeys.length - 1, i + dy))
+    // Vertical moves skip across a horizontal group in one step.
+    if (dx === 0 && horizontal) {
+      var group = footerKeys.indexOf(cursorKey) !== -1 ? footerKeys : tileKeys
+      while (i + dy >= 0 && i + dy < navKeys.length && group.indexOf(navKeys[i + dy]) !== -1) i += dy
+    }
+    i = i === -1 ? 0 : Math.max(0, Math.min(navKeys.length - 1, i + dy))
     cursorKey = navKeys[i] || "daemon"
     scrollToCursor()
   }
@@ -93,6 +102,12 @@ Panel {
     return null
   }
 
+  function pair() {
+    if (joinable) { tuple.join(joinText); joinText = "" }
+    else if (joinText.trim() !== "") tuple.join(joinText)   // surfaces the "not a call link" error
+    else tuple.newCall()
+  }
+
   function activate(key) {
     if (key === "daemon") tuple.toggleDaemon()
     else if (key === "login") tuple.login()
@@ -104,9 +119,7 @@ Panel {
     else if (key === "share") tuple.toggleShare()
     else if (key === "copyLink") tuple.copy(tuple.personalUrl, "Call link")
     else if (key === "end") tuple.endCall()
-    else if (key === "new") tuple.newCall()
-    else if (key === "joinClipboard") tuple.join(tuple.clipboardCallUrl)
-    else if (key === "join") focusField(joinField)
+    else if (key === "pair") pair()
     else if (key === "search") focusField(searchField)
     else if (key === "settings") settingsOpen = !settingsOpen
     else if (key === "debug") tuple.openDebugUi()
@@ -151,21 +164,40 @@ Panel {
     return null
   }
 
+  function firstContentKey() {
+    for (var i = 0; i < navKeys.length; i++) if (navKeys[i] !== "daemon") return navKeys[i]
+    return "daemon"
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onOpenedChanged: if (opened) {
-    cursorActive = false
-    cursorKey = navKeys.length > 1 ? navKeys[1] : "daemon"
-    if (panelFlick) panelFlick.contentY = 0
-    tuple.refresh()
-    refocusKeys()
+  onOpenedChanged: {
+    if (opened) {
+      cursorActive = false
+      cursorKey = firstContentKey()
+      if (panelFlick) panelFlick.contentY = 0
+      tuple.refresh()
+      refocusKeys()
+    } else {
+      joinText = ""
+      contactQuery = ""
+    }
   }
-  onNavKeysChanged: if (navKeys.indexOf(cursorKey) === -1) cursorKey = navKeys.length > 1 ? navKeys[1] : "daemon"
+  onNavKeysChanged: if (navKeys.indexOf(cursorKey) === -1) cursorKey = firstContentKey()
 
   Service {
     id: tuple
     settings: root.settings
+  }
+
+  // A call link on the clipboard is almost certainly the one you're about to
+  // join — put it in the field so the button reads "Join".
+  Connections {
+    target: tuple
+    function onClipboardCallUrlChanged() {
+      if (root.opened && root.joinText === "" && tuple.clipboardCallUrl !== "") root.joinText = tuple.clipboardCallUrl
+    }
   }
 
   IpcHandler {
@@ -241,13 +273,13 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(380))
+    contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: joinField.activeFocus || authField.activeFocus || searchField.activeFocus
+      blocked: pairField.activeFocus || authField.activeFocus || searchField.activeFocus
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dx, dy)
@@ -261,11 +293,11 @@ Panel {
         else if (k === "s" && tuple.inCall) tuple.toggleShare()
         else if (k === "e" && (tuple.inCall || tuple.incoming)) tuple.endCall()
         else if (k === "a" && tuple.incoming) tuple.answer()
-        else if (k === "n" && tuple.loggedIn && !tuple.inCall) tuple.newCall()
+        else if (k === "n" && root.showPair) tuple.newCall()
         else if (k === "c" && tuple.personalUrl !== "") tuple.copy(tuple.personalUrl, "Call link")
-        else if (k === "i" && tuple.loggedIn && !tuple.inCall) root.focusField(joinField)
+        else if (k === "i" && root.showPair) root.focusField(pairField)
+        else if (k === "/" && tuple.contacts.length > 0) root.focusField(searchField)
         else if (k === "f" && root.cursorKey.indexOf("contact:") === 0) tuple.toggleFavorite(root.contactById(root.cursorKey.slice(8)))
-        else if (k === "/") root.focusField(searchField)
         else if (k === "o") tuple.toggleDaemon()
         else if (k === "r") tuple.refresh()
       }
@@ -299,7 +331,6 @@ Panel {
               width: parent.width
               title: "Tuple"
               meta: tuple.statusText
-              detail: tuple.log.version !== "" ? tuple.log.version.replace(/^v(\d{4})_(\d\d)_(\d\d)\.(\d+)$/, "$1.$2.$3") : ""
               foreground: root.foreground
               fontFamily: root.fontFamily
               iconOpacity: tuple.daemon ? 1.0 : 0.5
@@ -326,7 +357,7 @@ Panel {
 
                   PanelToolTip {
                     visible: powerSwitch.containsMouse
-                    text: tuple.daemon ? "Stop Tuple (you won't receive calls)" : "Start Tuple to receive calls"
+                    text: tuple.daemon ? "Turn off — you won't receive calls" : "Turn on to pair and receive calls"
                     fontFamily: hero.fontFamily
                   }
                 }
@@ -347,12 +378,7 @@ Panel {
 
           Hint {
             visible: !tuple.installed
-            text: "The tuple CLI isn't on PATH. Install it from tuple.app/linux into ~/.local/bin."
-          }
-
-          Hint {
-            visible: tuple.installed && tuple.daemonKnown && !tuple.daemon
-            text: "Tuple is off. Turn it on to start calls and get called."
+            text: "The tuple CLI isn't on your PATH. Install it from tuple.app/linux."
           }
 
           // ── Login ─────────────────────────────────────────────────────
@@ -362,13 +388,12 @@ Panel {
             spacing: Style.space(8)
 
             PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader { text: "ACCOUNT"; foreground: root.foreground; fontFamily: root.fontFamily }
 
             ActionRow {
               navKey: "login"
               glyph: "󰍂"
-              title: tuple.loginUrl !== "" ? "Restart login" : "Log in to Tuple"
-              subtitle: "Opens tuple.app in your browser"
+              title: tuple.loginUrl !== "" ? "Restart login" : "Log in"
+              subtitle: "Continues in your browser"
               spinning: tuple.isPending("login")
               onActivated: tuple.login()
             }
@@ -395,7 +420,7 @@ Panel {
                 Layout.fillWidth: true
                 foreground: root.foreground
                 hasCursor: root.hasCursor("auth")
-                placeholderText: "Paste authorization code"
+                placeholderText: "Authorization code"
                 text: root.authCode
                 onTextChanged: root.authCode = text
                 onAccepted: { tuple.submitAuth(text); root.authCode = ""; root.refocusKeys() }
@@ -404,8 +429,10 @@ Panel {
 
               Button {
                 text: "Log in"
+                bordered: true
                 foreground: root.foreground
                 fontFamily: root.fontFamily
+                Layout.preferredHeight: authField.height
                 enabled: root.authCode.trim() !== "" && !tuple.isPending("auth")
                 onClicked: { tuple.submitAuth(root.authCode); root.authCode = "" }
               }
@@ -413,30 +440,21 @@ Panel {
           }
 
           // ── Incoming call ─────────────────────────────────────────────
-          Column {
+          Row {
             visible: tuple.loggedIn && tuple.incoming
             width: parent.width
             spacing: Style.space(8)
-
-            PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader { text: "INCOMING CALL"; foreground: root.foreground; fontFamily: root.fontFamily }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
-              ControlTile { navKey: "answer"; width: (parent.width - parent.spacing) / 2; glyph: "󰏷"; label: "Answer"; hint: "a"; onActivated: tuple.answer() }
-              ControlTile { navKey: "decline"; width: (parent.width - parent.spacing) / 2; glyph: "󰏵"; label: "Decline"; hint: "e"; alert: true; onActivated: tuple.decline() }
-            }
+            ControlTile { navKey: "answer"; width: (parent.width - parent.spacing) / 2; glyph: "󰏷"; label: "Answer"; onActivated: tuple.answer() }
+            ControlTile { navKey: "decline"; width: (parent.width - parent.spacing) / 2; glyph: "󰏵"; label: "Decline"; alert: true; onActivated: tuple.decline() }
           }
 
           // ── In call ───────────────────────────────────────────────────
           Column {
             visible: tuple.loggedIn && tuple.inCall
             width: parent.width
-            spacing: Style.space(8)
+            spacing: Style.space(10)
 
             PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader { text: tuple.call === "connecting" ? "CONNECTING" : "IN CALL"; foreground: root.foreground; fontFamily: root.fontFamily }
 
             Repeater {
               model: tuple.peers
@@ -444,8 +462,7 @@ Panel {
                 required property var modelData
                 width: parent.width
                 name: String(modelData)
-                caption: tuple.log.peerSharing === String(modelData) ? "Sharing their screen" : "In the call"
-                online: true
+                caption: tuple.log.peerSharing === String(modelData) ? "Sharing their screen" : ""
               }
             }
 
@@ -458,17 +475,17 @@ Panel {
               ControlTile {
                 navKey: "mute"; width: parent.tileWidth
                 glyph: tuple.muted ? "󰍭" : "󰍬"
-                label: tuple.muted ? "Unmute" : "Mute"
-                hint: "m"
+                label: tuple.muted ? "Muted" : "Mic on"
+                tooltip: (tuple.muted ? "Unmute" : "Mute") + " (m)"
                 checked: tuple.muted
                 busy: tuple.isPending("mute") || tuple.isPending("unmute")
                 onActivated: tuple.toggleMute()
               }
               ControlTile {
                 navKey: "share"; width: parent.tileWidth
-                glyph: tuple.sharing ? "󰞊" : "󱒃"
-                label: tuple.sharing ? "Stop share" : "Share"
-                hint: "s"
+                glyph: "󱒃"
+                label: tuple.sharing ? "Sharing" : "Share"
+                tooltip: (tuple.sharing ? "Stop sharing" : "Share your screen") + " (s)"
                 checked: tuple.sharing
                 busy: tuple.isPending("share") || tuple.isPending("unshare")
                 onActivated: tuple.toggleShare()
@@ -476,99 +493,94 @@ Panel {
               ControlTile {
                 visible: tuple.personalUrl !== ""
                 navKey: "copyLink"; width: parent.tileWidth
-                glyph: "󰌹"; label: "Copy link"; hint: "c"
+                glyph: "󰌹"; label: "Link"
+                tooltip: "Copy call link (c)"
                 onActivated: tuple.copy(tuple.personalUrl, "Call link")
               }
               ControlTile {
                 navKey: "end"; width: parent.tileWidth
-                glyph: "󰏵"; label: "End"; hint: "e"; alert: true
+                glyph: "󰏵"; label: "End"; alert: true
+                tooltip: "End call (e)"
                 busy: tuple.isPending("end")
                 onActivated: tuple.endCall()
               }
             }
           }
 
-          // ── Start a call ──────────────────────────────────────────────
-          Column {
-            visible: tuple.loggedIn && !tuple.inCall && !tuple.incoming
+          // ── Start or join: one field, one button ──────────────────────
+          RowLayout {
+            visible: root.showPair
             width: parent.width
             spacing: Style.space(8)
+            property string navKey: "pair"
 
-            PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader { text: "PAIR"; foreground: root.foreground; fontFamily: root.fontFamily }
-
-            ActionRow {
-              navKey: "new"
-              glyph: "󰐕"
-              title: "New call"
-              subtitle: "Start your personal room and copy the link"
-              hint: "n"
-              spinning: tuple.isPending("new")
-              onActivated: tuple.newCall()
+            TextField {
+              id: pairField
+              Layout.fillWidth: true
+              foreground: root.foreground
+              hasCursor: root.hasCursor("pair")
+              placeholderText: "Paste a call link to join"
+              text: root.joinText
+              onTextChanged: root.joinText = text
+              onAccepted: { root.pair(); root.refocusKeys() }
+              Keys.onEscapePressed: { if (text !== "") root.joinText = ""; else root.refocusKeys() }
             }
 
-            ActionRow {
-              visible: tuple.clipboardCallUrl !== ""
-              navKey: "joinClipboard"
-              glyph: "󰆒"
-              title: "Join from clipboard"
-              subtitle: tuple.clipboardCallUrl
-              spinning: tuple.isPending("join")
-              onActivated: tuple.join(tuple.clipboardCallUrl)
-            }
-
-            RowLayout {
-              width: parent.width
-              spacing: Style.space(8)
-              property string navKey: "join"
-
-              TextField {
-                id: joinField
-                Layout.fillWidth: true
-                foreground: root.foreground
-                hasCursor: root.hasCursor("join")
-                placeholderText: "Paste a tuple.app/c/… link  (i)"
-                text: root.joinText
-                onTextChanged: root.joinText = text
-                onAccepted: { tuple.join(text); root.joinText = ""; root.refocusKeys() }
-                Keys.onEscapePressed: root.refocusKeys()
-              }
-
-              Button {
-                text: "Join"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                enabled: Model.extractCallUrl(root.joinText) !== "" && !tuple.isPending("join")
-                onClicked: { tuple.join(root.joinText); root.joinText = "" }
-              }
+            Button {
+              id: pairButton
+              readonly property bool working: tuple.isPending("new") || tuple.isPending("join")
+              text: tuple.isPending("join") ? "Joining…" : (tuple.isPending("new") ? "Starting…" : (root.joinable ? "Join" : "New call"))
+              tooltipText: root.joinable ? "Join this call" : "Start a call and copy its link (n)"
+              bordered: true
+              selected: root.hasCursor("pair")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              Layout.preferredHeight: pairField.height
+              Layout.preferredWidth: Math.max(implicitWidth, Style.space(96))
+              enabled: !working
+              onClicked: root.pair()
             }
           }
 
-          // ── Contacts ──────────────────────────────────────────────────
+          // ── People ────────────────────────────────────────────────────
           Column {
             visible: tuple.loggedIn
             width: parent.width
             spacing: Style.space(6)
 
             PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader {
-              text: {
-                var c = tuple.contactCounts
-                if (c.total === 0) return "TEAM"
-                return "TEAM · " + c.onlineFavorites + "/" + c.favorites + " FAVORITES ONLINE · " + c.online + " AVAILABLE"
+
+            Item {
+              width: parent.width
+              implicitHeight: teamHeader.implicitHeight
+
+              PanelSectionHeader {
+                id: teamHeader
+                text: "PEOPLE"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
               }
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+
+              Text {
+                anchors.right: parent.right
+                anchors.baseline: teamHeader.baseline
+                visible: tuple.contactCounts.online > 0
+                text: tuple.contactCounts.online + " available"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
             }
 
             TextField {
               id: searchField
-              visible: tuple.contacts.length > 0
+              // Only worth showing when the list can't show everyone.
+              visible: tuple.contacts.length > Model.featuredContacts(tuple.contacts, root.contactLimit).length || root.contactQuery !== ""
               width: parent.width
               property string navKey: "search"
               foreground: root.foreground
               hasCursor: root.hasCursor("search")
-              placeholderText: "Search " + tuple.contactCounts.total.toLocaleString() + " people  (/)"
+              placeholderText: "Search people"
               text: root.contactQuery
               onTextChanged: root.contactQuery = text
               onAccepted: {
@@ -579,17 +591,7 @@ Panel {
               Keys.onDownPressed: { if (root.shownContacts.length > 0) { root.cursorActive = true; root.cursorKey = "contact:" + root.shownContacts[0].id }; root.refocusKeys() }
             }
 
-            Text {
-              visible: root.shownContacts.length === 0
-              width: parent.width
-              text: !tuple.contactsLoaded ? "Loading contacts…"
-                : (tuple.contacts.length === 0 ? "No contacts yet."
-                : (root.contactQuery !== "" ? "Nobody matches “" + root.contactQuery + "”." : "No favorites or available teammates. Search to find someone, then ★ them."))
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              horizontalAlignment: Text.AlignHCenter
-            }
+            Item { width: 1; height: Style.space(2) }
 
             Repeater {
               model: root.shownContacts
@@ -600,33 +602,32 @@ Panel {
               }
             }
 
-            Text {
-              visible: root.contactQuery !== "" && root.shownContacts.length >= root.contactLimit
-              width: parent.width
-              text: "Showing the first " + root.contactLimit + " matches — keep typing to narrow it down."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+            Hint {
+              visible: root.shownContacts.length === 0
               horizontalAlignment: Text.AlignHCenter
+              topPadding: Style.space(6)
+              bottomPadding: Style.space(6)
+              text: !tuple.contactsLoaded ? "Loading people…"
+                : (tuple.contacts.length === 0 ? "No one here yet."
+                : (root.contactQuery !== "" ? "No one matches “" + root.contactQuery + "”."
+                : "No one's available. Search for someone and star them to call them from here."))
+            }
+
+            Hint {
+              visible: root.contactQuery !== "" && root.shownContacts.length >= root.contactLimit
+              horizontalAlignment: Text.AlignHCenter
+              font.pixelSize: Style.font.caption
+              text: "Keep typing to narrow it down."
             }
           }
 
-          // ── Settings ──────────────────────────────────────────────────
+          // ── Settings (expanded from the footer) ───────────────────────
           Column {
-            visible: tuple.loggedIn && tuple.tupleSettings.length > 0
+            visible: tuple.loggedIn && root.settingsOpen && tuple.tupleSettings.length > 0
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(4)
 
             PanelSeparator { foreground: root.foreground }
-
-            ActionRow {
-              navKey: "settings"
-              glyph: "󰒓"
-              title: "Settings"
-              subtitle: root.settingsOpen ? "" : tuple.tupleSettings.length + " options"
-              trailingText: root.settingsOpen ? "−" : "+"
-              onActivated: root.settingsOpen = !root.settingsOpen
-            }
 
             Repeater {
               model: root.settingsOpen ? tuple.tupleSettings : []
@@ -638,13 +639,23 @@ Panel {
             }
           }
 
-          // ── Footer ────────────────────────────────────────────────────
-          Row {
+          // ── Footer: quiet, secondary ──────────────────────────────────
+          Column {
             visible: tuple.loggedIn
             width: parent.width
             spacing: Style.space(8)
-            ControlTile { navKey: "debug"; width: (parent.width - parent.spacing) / 2; glyph: "󰏌"; label: "Tuple window"; compact: true; onActivated: tuple.openDebugUi() }
-            ControlTile { navKey: "logout"; width: (parent.width - parent.spacing) / 2; glyph: "󰍃"; label: "Log out"; compact: true; onActivated: tuple.logout() }
+
+            PanelSeparator { foreground: root.foreground }
+
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(4)
+
+              FooterButton { navKey: "settings"; text: root.settingsOpen ? "Hide settings" : "Settings"; onClicked: root.settingsOpen = !root.settingsOpen }
+              Item { Layout.fillWidth: true }
+              FooterButton { navKey: "debug"; text: "Tuple window"; onClicked: tuple.openDebugUi() }
+              FooterButton { navKey: "logout"; text: "Log out"; onClicked: tuple.logout() }
+            }
           }
         }
       }
@@ -661,6 +672,15 @@ Panel {
     wrapMode: Text.WordWrap
   }
 
+  component FooterButton: Button {
+    property string navKey: ""
+    hasCursor: root.hasCursor(navKey)
+    foreground: hasCursor ? root.foreground : root.dim
+    fontFamily: root.fontFamily
+    fontSize: Style.font.bodySmall
+    onHovered: function(on) { if (on) root.hover(navKey) }
+  }
+
   component ActionRow: CursorSurface {
     id: actionRow
     signal activated()
@@ -669,8 +689,6 @@ Panel {
     property string glyph: ""
     property string title: ""
     property string subtitle: ""
-    property string hint: ""
-    property string trailingText: ""
     property string trailingGlyph: ""
     property bool spinning: false
 
@@ -740,15 +758,6 @@ Panel {
         }
       }
 
-      Text {
-        visible: actionRow.hint !== "" || actionRow.trailingText !== ""
-        text: actionRow.trailingText !== "" ? actionRow.trailingText : actionRow.hint
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: actionRow.trailingText !== "" ? Style.font.heading : Style.font.caption
-        Layout.alignment: Qt.AlignVCenter
-      }
-
       PanelActionButton {
         visible: actionRow.trailingGlyph !== ""
         iconText: actionRow.trailingGlyph
@@ -766,12 +775,11 @@ Panel {
     property string navKey: ""
     property string glyph: ""
     property string label: ""
-    property string hint: ""
+    property string tooltip: ""
     property bool checked: false
     property bool alert: false
     property bool busy: false
-    property bool compact: false
-    readonly property color tint: alert ? root.urgent : root.foreground
+    readonly property color tint: alert ? root.urgent : (checked ? root.foreground : root.foreground)
 
     hasCursor: root.hasCursor(navKey)
     current: checked
@@ -779,9 +787,10 @@ Panel {
     foreground: root.foreground
     fill: root.hoverFill
     currentFill: root.selectedFill
-    implicitHeight: compact ? Style.space(34) : Style.space(58)
+    implicitHeight: Style.space(54)
 
     MouseArea {
+      id: tileMouse
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
@@ -790,9 +799,8 @@ Panel {
     }
 
     Column {
-      visible: !tile.compact
       anchors.centerIn: parent
-      spacing: Style.space(3)
+      spacing: Style.space(4)
 
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
@@ -812,29 +820,16 @@ Panel {
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: tile.label
-        color: tile.alert ? root.urgent : root.foreground
+        color: tile.alert ? root.urgent : (tile.checked || tile.hasCursor ? root.foreground : root.dim)
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
       }
     }
 
-    Row {
-      visible: tile.compact
-      anchors.centerIn: parent
-      spacing: Style.space(8)
-      Text { text: tile.glyph; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.icon; anchors.verticalCenter: parent.verticalCenter }
-      Text { text: tile.label; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; anchors.verticalCenter: parent.verticalCenter }
-    }
-
-    Text {
-      visible: tile.hint !== "" && !tile.compact
-      anchors.top: parent.top
-      anchors.right: parent.right
-      anchors.margins: Style.space(5)
-      text: tile.hint
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
+    PanelToolTip {
+      visible: tile.tooltip !== "" && tileMouse.containsMouse
+      text: tile.tooltip
+      fontFamily: root.fontFamily
     }
   }
 
@@ -842,11 +837,10 @@ Panel {
     id: avatar
     property string name: ""
     property bool online: false
-    property bool showPresence: true
-    width: Style.space(26)
+    width: Style.space(24)
     height: width
     radius: Style.cornerRadius > 0 ? width / 2 : 0
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, online ? 0.16 : 0.07)
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, online ? 0.14 : 0.06)
 
     Text {
       anchors.centerIn: parent
@@ -857,17 +851,18 @@ Panel {
       font.bold: true
     }
 
+    // Presence, shown once and only when it's good news.
     Rectangle {
-      visible: avatar.showPresence
-      width: Style.space(8)
+      visible: avatar.online
+      width: Style.space(7)
       height: width
       radius: width / 2
       anchors.right: parent.right
       anchors.bottom: parent.bottom
-      anchors.margins: -Style.space(1)
-      color: avatar.online ? Color.accent : Color.background
-      border.width: Math.max(1, Style.space(1))
-      border.color: avatar.online ? Color.background : root.dim
+      anchors.margins: -Style.space(2)
+      color: Color.accent
+      border.width: Math.max(1, Style.space(2))
+      border.color: Color.popups.background
     }
   }
 
@@ -875,21 +870,31 @@ Panel {
     id: personRow
     property string name: ""
     property string caption: ""
-    property bool online: false
-    implicitHeight: Style.space(34)
+    implicitHeight: Style.space(30)
 
-    Row {
-      anchors.left: parent.left
-      anchors.leftMargin: Style.space(8)
-      anchors.verticalCenter: parent.verticalCenter
+    RowLayout {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(6)
       spacing: Style.space(10)
 
-      Avatar { name: personRow.name; online: personRow.online; anchors.verticalCenter: parent.verticalCenter }
+      Avatar { name: personRow.name; online: true; Layout.alignment: Qt.AlignVCenter }
 
-      Column {
-        anchors.verticalCenter: parent.verticalCenter
-        Text { text: personRow.name; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
-        Text { text: personRow.caption; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+      Text {
+        Layout.fillWidth: true
+        text: personRow.name
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        elide: Text.ElideRight
+      }
+
+      Text {
+        visible: personRow.caption !== ""
+        text: personRow.caption
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
     }
   }
@@ -899,13 +904,16 @@ Panel {
     property var contact: null
     readonly property string navKey: contact ? "contact:" + contact.id : ""
     readonly property bool callable: contact && contact.favorite && contact.online && !tuple.inCall && !tuple.incoming
+    readonly property bool revealed: hasCursor || rowMouse.containsMouse
+    readonly property string presence: contact ? Model.presenceLabel(contact.status) : ""
 
     hasCursor: root.hasCursor(navKey)
     foreground: root.foreground
     fill: root.hoverFill
-    implicitHeight: contactInner.implicitHeight + Style.spacing.lg
+    implicitHeight: Style.space(34)
 
     MouseArea {
+      id: rowMouse
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: contactRow.callable ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -914,12 +922,9 @@ Panel {
     }
 
     RowLayout {
-      id: contactInner
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(8)
-      anchors.rightMargin: Style.space(6)
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(4)
       spacing: Style.space(10)
 
       Avatar {
@@ -928,48 +933,48 @@ Panel {
         Layout.alignment: Qt.AlignVCenter
       }
 
-      ColumnLayout {
+      Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
-        spacing: Style.space(1)
+        text: contactRow.contact ? contactRow.contact.name : ""
+        color: contactRow.contact && contactRow.contact.online ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        elide: Text.ElideRight
+      }
 
-        Text {
-          textFormat: Text.PlainText
-          Layout.fillWidth: true
-          text: contactRow.contact ? contactRow.contact.name : ""
-          color: contactRow.contact && contactRow.contact.online ? root.foreground : root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
-        }
-
-        Text {
-          textFormat: Text.PlainText
-          Layout.fillWidth: true
-          text: contactRow.contact ? [contactRow.contact.status, contactRow.contact.email].filter(function(s) { return s !== "" }).join(" · ") : ""
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
+      // At rest: what's worth knowing. On hover: what you can do.
+      Text {
+        visible: !contactRow.revealed && (contactRow.presence !== "" || (contactRow.contact && contactRow.contact.favorite && root.contactQuery !== ""))
+        text: contactRow.presence + (contactRow.contact && contactRow.contact.favorite && root.contactQuery !== "" ? (contactRow.presence !== "" ? "  ★" : "★") : "")
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        Layout.alignment: Qt.AlignVCenter
       }
 
       PanelActionButton {
+        visible: contactRow.revealed
         iconText: contactRow.contact && contactRow.contact.favorite ? "󰓎" : "󰓒"
-        tooltipText: contactRow.contact && contactRow.contact.favorite ? "Unfavorite (f)" : "Favorite (f) — only favorites can be called"
-        foreground: contactRow.contact && contactRow.contact.favorite ? root.foreground : root.dim
+        tooltipText: contactRow.contact && contactRow.contact.favorite ? "Remove from favorites (f)" : "Add to favorites (f)"
+        foreground: root.foreground
         fontFamily: root.fontFamily
-        hasCursor: false
         Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.hover(contactRow.navKey) }
         onClicked: tuple.toggleFavorite(contactRow.contact)
       }
 
       PanelActionButton {
+        visible: contactRow.revealed
         iconText: "󰏲"
-        tooltipText: contactRow.callable ? "Call" : (tuple.inCall ? "Already in a call" : "Online favorites can be called")
+        tooltipText: contactRow.callable ? "Call"
+          : (tuple.inCall ? "You're already in a call"
+          : (contactRow.contact && !contactRow.contact.favorite ? "Star to call — Tuple only calls favorites" : "Not available"))
         enabled: contactRow.callable && !tuple.isPending("call")
         foreground: root.foreground
         fontFamily: root.fontFamily
         Layout.alignment: Qt.AlignVCenter
+        onHovered: function(on) { if (on) root.hover(contactRow.navKey) }
         onClicked: tuple.callContact(contactRow.contact)
       }
     }
@@ -996,8 +1001,8 @@ Panel {
 
     RowLayout {
       anchors.fill: parent
-      anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(8)
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(4)
       spacing: Style.space(10)
 
       ColumnLayout {
@@ -1016,7 +1021,7 @@ Panel {
 
         Text {
           Layout.fillWidth: true
-          text: settingRow.setting ? settingRow.setting.description + (settingRow.setting.type === "text" ? " — tuple set " + settingRow.setting.name + " <value>" : "") : ""
+          text: settingRow.setting ? settingRow.setting.description + (settingRow.setting.type === "text" ? " — set with: tuple set " + settingRow.setting.name + " <value>" : "") : ""
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -1036,8 +1041,8 @@ Panel {
 
       Text {
         visible: !settingRow.isBool
-        text: settingRow.setting ? (settingRow.setting.value !== "" ? settingRow.setting.value : "—") + (settingRow.setting.type === "choice" ? "  ›" : "") : ""
-        color: root.foreground
+        text: settingRow.setting ? (settingRow.setting.value !== "" ? settingRow.setting.value : "—") : ""
+        color: settingRow.setting && settingRow.setting.type === "choice" ? root.foreground : root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
         Layout.alignment: Qt.AlignVCenter
