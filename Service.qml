@@ -44,6 +44,7 @@ Item {
   readonly property bool inCall: call === "active" || call === "connecting" || call === "ending"
   readonly property bool incoming: call === "incoming"
   readonly property bool sharing: inCall && log.sharing
+  readonly property bool cameraOn: cameraProc.running
   readonly property var peers: daemon ? log.peers : []
   readonly property bool busy: Object.keys(pending).length > 0
   readonly property bool startCallsMuted: settingValue("start-calls-muted") === "1"
@@ -414,6 +415,52 @@ Item {
   function answer() { run(["ui"], { quiet: true }) }
   function decline() { endCall() }
   function openDebugUi() { run(["ui"], { quiet: true }) }
+
+  // ── Camera ────────────────────────────────────────────────────────────
+  // Tuple for Linux can't send webcam video yet (its WebcamCapturerAdapter is
+  // a TODO in v2026_09_16.1). Until it can, show your camera as Omarchy's
+  // floating WebcamOverlay — the same mpv window `omarchy capture
+  // screenrecording --with-webcam` uses, so Omarchy's own window rules pin it
+  // to the corner — and it reaches your peer through the screen share.
+  function setCamera(on) {
+    if (on === cameraProc.running) return
+    if (on) {
+      cameraProc.command = ["bash", "-c", cameraScript, "tuple-camera",
+        String(setting("cameraDevice", "")), String(setting("cameraSize", "medium"))]
+      cameraProc.stopping = false
+      cameraProc.running = true
+      say(sharing ? "Your camera is on your shared screen" : "Camera on — share your screen so they can see it", false)
+    } else {
+      cameraProc.stopping = true
+      cameraProc.running = false
+    }
+  }
+
+  function toggleCamera() { setCamera(!cameraProc.running) }
+
+  readonly property string cameraScript:
+    "dev=\"$1\"; size=\"${2:-medium}\"; "
+    + "[ -n \"$dev\" ] || dev=$(omarchy-capture-webcam-list 2>/dev/null | sed -n '1s/[[:space:]].*//p'); "
+    + "[ -n \"$dev\" ] || { echo 'No webcam found' >&2; exit 3; }; "
+    + "opts=framerate=30; fmts=$(v4l2-ctl --list-formats-ext -d \"$dev\" 2>/dev/null); "
+    + "for r in 640x360 1280x720 1920x1080; do case \"$fmts\" in *$r*) opts=\"video_size=$r,$opts\"; break;; esac; done; "
+    + "exec mpv \"av://v4l2:$dev\" --profile=low-latency --untimed --no-cache "
+    + "--demuxer-lavf-o=\"$opts\" '--vf=lavfi=[crop=ih*8/9:ih]' "
+    + "--title=WebcamOverlay --wayland-app-id=\"WebcamOverlay-$size\" "
+    + "--no-border --no-audio --no-osc --osd-level=0 --really-quiet"
+
+  Process {
+    id: cameraProc
+    property bool stopping: false
+    stderr: SplitParser { onRead: function(line) { if (line.trim() !== "") root.say(line.trim(), true) } }
+    onExited: function(code) {
+      if (!stopping && code !== 0) root.say(code === 3 ? "No webcam found" : "Camera stopped — is another app using it?", true)
+      stopping = false
+    }
+  }
+
+  // The overlay only makes sense during a call.
+  onInCallChanged: if (!inCall && cameraProc.running && setting("cameraFollowsCall", true) !== false) setCamera(false)
 
   // ── Settings ──────────────────────────────────────────────────────────
   function refreshSettings() {

@@ -14,7 +14,7 @@ panels, so it follows your theme, fonts, borders, and keyboard conventions.
   - browser login with an auth-code field
   - new call (copies your link)
   - join a call from a pasted link or straight from the clipboard
-  - in-call controls: mute, share, copy link, end
+  - in-call controls: mute, share, camera, copy link, end
   - who's in the call and who's sharing
   - favourites and available teammates, with search across the whole org
     directory, a ★ toggle, and one-click calling
@@ -22,11 +22,30 @@ panels, so it follows your theme, fonts, borders, and keyboard conventions.
   - a shortcut to Tuple's own window, and log out
 - **Notifications:** you get a desktop notification for incoming calls.
 
+## Webcams
+
+- **Their webcam:** it shows as a floating picture-in-picture in the
+  bottom-right corner. It stays on every workspace, never steals focus, and
+  keeps its shape when resized. Drag it with `SUPER` + left mouse and resize it
+  with `SUPER` + right mouse. The rule is in `hypr/tuple.lua`, which also
+  floats and centres Tuple's small prompts (incoming call, join request,
+  errors).
+- **Your webcam:** Tuple for Linux can't send webcam video yet. In
+  v2026_09_16.1 the capture code is still a TODO (`WebcamCapturerAdapter:
+  TODO: implement Start`), and there's no command for it. Until it ships, the
+  **Camera** button (`v`) opens Omarchy's own floating camera overlay, the one
+  `omarchy capture screenrecording --with-webcam` uses. Your peer sees you
+  whenever you share your screen. The overlay closes when the call ends.
+  - **Settings:** `cameraDevice` (blank uses the first camera from
+    `omarchy-capture-webcam-list`), `cameraSize` (`small`/`medium`/`large`),
+    and `cameraFollowsCall`.
+
 ## Install
 
 ```bash
-./install.sh            # symlinks into ~/.config/omarchy/plugins/sehl.tuple and adds it to the bar
-./uninstall.sh          # disables it and removes the symlink
+./install.sh            # symlinks into ~/.config/omarchy/plugins/sehl.tuple, adds it to the bar,
+                        # and loads hypr/tuple.lua via ~/.local/state/omarchy/toggles/hypr/tuple.lua
+./uninstall.sh          # undoes all three
 ```
 
 Pass a placement to `install.sh`, e.g. `./install.sh --section right --before omarchy.agents`.
@@ -50,6 +69,7 @@ selected row. Other keys:
 |---|---|
 | `m` | mute |
 | `s` | share |
+| `v` | camera overlay |
 | `e` | end or decline |
 | `a` | answer |
 | `n` | new call |
@@ -65,7 +85,7 @@ selected row. Other keys:
 ### IPC and keybindings
 
 ```bash
-omarchy-shell sehl.tuple toggle | toggleMute | toggleShare | end | newCall | joinClipboard | copyLink | on | off
+omarchy-shell sehl.tuple toggle | toggleMute | toggleShare | toggleCamera | end | newCall | joinClipboard | copyLink | on | off
 omarchy-shell sehl.tuple join https://tuple.app/c/xyz
 omarchy-shell sehl.tuple status        # JSON: daemon, loggedIn, call, peers, muted, sharing, …
 omarchy-shell sehl.tuple demo call     # canned UI states: call | idle | incoming | login | off (back to live)

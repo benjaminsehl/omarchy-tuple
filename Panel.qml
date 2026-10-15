@@ -48,7 +48,7 @@ Panel {
   // people); show available + favorites, or the top search matches.
   readonly property var shownContacts: Model.searchContacts(tuple.contacts, contactQuery, contactLimit)
   readonly property var footerKeys: ["settings", "debug", "logout"]
-  readonly property var tileKeys: ["answer", "decline", "mute", "share", "copyLink", "end"]
+  readonly property var tileKeys: ["answer", "decline", "mute", "share", "camera", "copyLink", "end"]
 
   readonly property var navKeys: {
     var keys = []
@@ -62,7 +62,7 @@ Panel {
     }
     if (tuple.incoming) { keys.push("answer"); keys.push("decline") }
     if (tuple.inCall) {
-      keys.push("mute"); keys.push("share")
+      keys.push("mute"); keys.push("share"); keys.push("camera")
       if (tuple.personalUrl !== "") keys.push("copyLink")
       keys.push("end")
     }
@@ -117,6 +117,7 @@ Panel {
     else if (key === "decline") tuple.decline()
     else if (key === "mute") tuple.toggleMute()
     else if (key === "share") tuple.toggleShare()
+    else if (key === "camera") tuple.toggleCamera()
     else if (key === "copyLink") tuple.copy(tuple.personalUrl, "Call link")
     else if (key === "end") tuple.endCall()
     else if (key === "pair") pair()
@@ -219,6 +220,7 @@ Panel {
     function share(): string { tuple.setSharing(true); return "ok" }
     function unshare(): string { tuple.setSharing(false); return "ok" }
     function toggleShare(): string { tuple.toggleShare(); return "ok" }
+    function toggleCamera(): string { tuple.toggleCamera(); return tuple.cameraOn ? "on" : "off" }
     function end(): string { tuple.endCall(); return "ok" }
     function demo(scenario: string): string { return tuple.setDemo(scenario) }
     function copyLink(): string { tuple.copy(tuple.personalUrl, "Call link"); return tuple.personalUrl }
@@ -291,6 +293,7 @@ Panel {
         var k = t.toLowerCase()
         if (k === "m" && tuple.inCall) tuple.toggleMute()
         else if (k === "s" && tuple.inCall) tuple.toggleShare()
+        else if (k === "v" && tuple.inCall) tuple.toggleCamera()
         else if (k === "e" && (tuple.inCall || tuple.incoming)) tuple.endCall()
         else if (k === "a" && tuple.incoming) tuple.answer()
         else if (k === "n" && root.showPair) tuple.newCall()
@@ -469,7 +472,7 @@ Panel {
             Row {
               width: parent.width
               spacing: Style.space(8)
-              readonly property int tiles: tuple.personalUrl !== "" ? 4 : 3
+              readonly property int tiles: tuple.personalUrl !== "" ? 5 : 4
               readonly property real tileWidth: (width - spacing * (tiles - 1)) / tiles
 
               ControlTile {
@@ -489,6 +492,15 @@ Panel {
                 checked: tuple.sharing
                 busy: tuple.isPending("share") || tuple.isPending("unshare")
                 onActivated: tuple.toggleShare()
+              }
+              ControlTile {
+                navKey: "camera"; width: parent.tileWidth
+                glyph: tuple.cameraOn ? "󰖠" : "󱜷"
+                label: "Camera"
+                tooltip: tuple.cameraOn ? "Hide your camera (v)"
+                  : "Show your camera on your shared screen (v) — Tuple for Linux can't send webcam video yet"
+                checked: tuple.cameraOn
+                onActivated: tuple.toggleCamera()
               }
               ControlTile {
                 visible: tuple.personalUrl !== ""

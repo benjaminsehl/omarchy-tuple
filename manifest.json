@@ -22,7 +22,10 @@
       "refreshIntervalSec": 60,
       "copyLinkOnNewCall": true,
       "notifyIncoming": true,
-      "tupleCommand": "tuple"
+      "tupleCommand": "tuple",
+      "cameraDevice": "",
+      "cameraSize": "medium",
+      "cameraFollowsCall": true
     },
     "schema": [
       {
@@ -51,6 +54,29 @@
         "type": "string",
         "label": "tuple command",
         "defaultValue": "tuple"
+      },
+      {
+        "key": "cameraDevice",
+        "type": "string",
+        "label": "Camera device (blank: first from omarchy-capture-webcam-list)",
+        "defaultValue": ""
+      },
+      {
+        "key": "cameraSize",
+        "type": "enum",
+        "label": "Camera overlay size",
+        "options": [
+          "small",
+          "medium",
+          "large"
+        ],
+        "defaultValue": "medium"
+      },
+      {
+        "key": "cameraFollowsCall",
+        "type": "boolean",
+        "label": "Turn the camera off when the call ends",
+        "defaultValue": true
       }
     ]
   }
