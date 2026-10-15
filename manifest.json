@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "sehl.tuple",
+  "name": "Tuple",
+  "version": "0.1.0",
+  "author": "Benjamin Sehl",
+  "license": "MIT",
+  "description": "Native Omarchy bar widget and panel for the Tuple Linux client: log in, start or join pair calls, mute, share, and call teammates.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Tuple",
+    "description": "Tuple call status in the bar, with a keyboard-friendly panel for calls, contacts, and settings.",
+    "category": "Communication",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 60,
+      "copyLinkOnNewCall": true,
+      "notifyIncoming": true,
+      "tupleCommand": "tuple"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Contact refresh interval (seconds)",
+        "min": 10,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 60
+      },
+      {
+        "key": "copyLinkOnNewCall",
+        "type": "boolean",
+        "label": "Copy call link when starting a new call",
+        "defaultValue": true
+      },
+      {
+        "key": "notifyIncoming",
+        "type": "boolean",
+        "label": "Notify on incoming calls",
+        "defaultValue": true
+      },
+      {
+        "key": "tupleCommand",
+        "type": "string",
+        "label": "tuple command",
+        "defaultValue": "tuple"
+      }
+    ]
+  }
+}
