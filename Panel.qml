@@ -27,6 +27,9 @@ Panel {
   readonly property color hoverFill: bar ? Style.hoverFillFor(bar.foreground, Color.accent) : "transparent"
   readonly property color selectedFill: bar ? Style.selectedFillFor(bar.foreground, Color.accent) : "transparent"
 
+  // Depth from the theme's [material]; flat unless the theme asks for it.
+  Material { id: depthTheme }
+
   readonly property color barIconColor: {
     if (!tuple.installed || !tuple.daemon || !tuple.loggedIn) return Qt.darker(barForeground, 1.55)
     if (tuple.incoming) return urgent
@@ -279,6 +282,8 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
 
+    CardShadow { material: depthTheme }
+
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
@@ -321,6 +326,9 @@ Panel {
           id: column
           width: panelFlick.width
           spacing: Style.space(12)
+          // Room for the last row's keys to stand on their lips; the
+          // Flickable clips at its edge.
+          bottomPadding: depthTheme.on ? Style.space(3) : 0
 
           // ── Hero ──────────────────────────────────────────────────────
           Item {
@@ -419,7 +427,7 @@ Panel {
               spacing: Style.space(8)
               property string navKey: "auth"
 
-              TextField {
+              WellField {
                 id: authField
                 Layout.fillWidth: true
                 foreground: root.foreground
@@ -431,9 +439,8 @@ Panel {
                 Keys.onEscapePressed: root.refocusKeys()
               }
 
-              Button {
+              KeyButton {
                 text: "Log in"
-                bordered: true
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 Layout.preferredHeight: authField.height
@@ -528,7 +535,7 @@ Panel {
             spacing: Style.space(8)
             property string navKey: "pair"
 
-            TextField {
+            WellField {
               id: pairField
               Layout.fillWidth: true
               foreground: root.foreground
@@ -540,14 +547,14 @@ Panel {
               Keys.onEscapePressed: { if (text !== "") root.joinText = ""; else root.refocusKeys() }
             }
 
-            Button {
+            KeyButton {
               id: pairButton
+              // With a link in the field, Join is the one thing to do: the orange key.
+              primary: root.joinable && !working
               readonly property bool working: tuple.isPending("new") || tuple.isPending("join")
               text: tuple.isPending("join") ? "Joining…" : (tuple.isPending("new") ? "Starting…" : (root.joinable ? "Join" : "New call"))
               tooltipText: root.joinable ? "Join this call" : "Start a call and copy its link (n)"
-              bordered: true
               selected: root.hasCursor("pair")
-              foreground: root.foreground
               fontFamily: root.fontFamily
               Layout.preferredHeight: pairField.height
               Layout.preferredWidth: Math.max(implicitWidth, Style.space(96))
@@ -586,7 +593,7 @@ Panel {
               }
             }
 
-            TextField {
+            WellField {
               id: searchField
               // Only worth showing when the list can't show everyone.
               visible: tuple.contacts.length > Model.featuredContacts(tuple.contacts, root.contactLimit).length || root.contactQuery !== ""
@@ -684,6 +691,53 @@ Panel {
     font.family: root.fontFamily
     font.pixelSize: Style.font.body
     wrapMode: Text.WordWrap
+  }
+
+  // A bordered button; with depth on, a key. `primary` makes it the orange one.
+  component KeyButton: Button {
+    id: kb
+    property bool primary: false
+    readonly property bool keyed: depthTheme.on
+    bordered: !keyed
+    foreground: keyed && primary ? Color.popups.background : root.foreground
+    Binding on color { when: kb.keyed; value: "transparent" }
+    Binding on borderSpec { when: kb.keyed; value: Border.none() }
+    transform: Translate { y: kbFace.sink; Behavior on y { NumberAnimation { duration: 70; easing.type: Easing.OutCubic } } }
+
+    KeyFace {
+      id: kbFace
+      z: -1
+      anchors.fill: parent
+      visible: kb.keyed
+      material: depthTheme
+      face: kb.primary ? Color.accent : depthTheme.key
+      hot: kb.hot || kb.selected
+      pressed: kbPress.active
+    }
+
+    PointHandler { id: kbPress; enabled: kb.keyed }
+  }
+
+  // A text field; with depth on, a well set into the panel rather than a
+  // frame that rises under the pointer like a key.
+  component WellField: TextField {
+    id: wf
+    readonly property bool welled: depthTheme.on
+    readonly property real edge: Math.max(1, Style.spacing.hairline)
+
+    Binding on background { when: wf.welled; value: wfWell }
+    Binding on topPadding { when: wf.welled; value: wf.verticalPadding + wf.edge }
+    Binding on bottomPadding { when: wf.welled; value: wf.verticalPadding + wf.edge }
+    Binding on leftPadding { when: wf.welled; value: wf.horizontalPadding + wf.edge }
+    Binding on rightPadding { when: wf.welled; value: wf.horizontalPadding + wf.edge }
+
+    WellFace {
+      id: wfWell
+      visible: wf.welled
+      material: depthTheme
+      focused: wf.activeFocus
+      hot: wf.hovered || wf.hasCursor
+    }
   }
 
   component FooterButton: Button {
@@ -802,6 +856,24 @@ Panel {
     fill: root.hoverFill
     currentFill: root.selectedFill
     implicitHeight: Style.space(54)
+
+    // With depth on, each tile is a key; on (muted, sharing, camera) it
+    // latches down, like the switches on a Braun radio.
+    readonly property bool keyed: depthTheme.on
+    Binding on color { when: tile.keyed; value: "transparent" }
+    Binding on borderSpec { when: tile.keyed; value: Border.none() }
+    transform: Translate { y: tileFace.sink; Behavior on y { NumberAnimation { duration: 70; easing.type: Easing.OutCubic } } }
+
+    KeyFace {
+      id: tileFace
+      z: -1
+      anchors.fill: parent
+      visible: tile.keyed
+      material: depthTheme
+      hot: tile.hasCursor
+      pressed: tileMouse.pressed
+      latched: tile.checked
+    }
 
     MouseArea {
       id: tileMouse

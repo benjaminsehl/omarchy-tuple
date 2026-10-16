@@ -45,6 +45,13 @@ panels, so it picks up your theme, fonts, borders and keyboard conventions.
   - all `tuple settings`
   - a shortcut to Tuple's own window, and log out
 - **Notifications:** you get a desktop notification for incoming calls.
+- **Depth, if your theme asks for it.** Themes that ship a `[material]`
+  section in `shell.toml` (Rams does) turn the call controls and buttons
+  into keys: they stand on a short lip and sink when pressed, and mute,
+  share and camera latch down while on. Join turns into an orange key
+  once a link is pasted, and the panel casts a soft shadow. Other themes
+  keep the flat look. The keys are documented in `Material.qml`;
+  `KeyFace.qml` and `CardShadow.qml` can be copied into other plugins.
 
 ## Webcams
 
