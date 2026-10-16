@@ -1,0 +1,37 @@
+#!/bin/bash
+# tuple-selfcam — your camera as a square, mirrored tile for the call stage.
+#
+# Tuple for Linux can't send webcam video yet (its WebcamCapturerAdapter is a
+# TODO in v2026_09_16.1, and it rejects ShareWebcamRequest), so this is a local
+# view: it reaches the other side only through your screen share.
+# bin/tuple-windows places it next to their webcam.
+#
+# Usage: tuple-selfcam [device]   (blank: first from omarchy-capture-webcam-list)
+set -uo pipefail
+
+dev="${1:-}"
+[ -n "$dev" ] || dev=$(omarchy-capture-webcam-list 2>/dev/null | sed -n '1s/[[:space:]].*//p')
+[ -n "$dev" ] || { echo 'No webcam found' >&2; exit 3; }
+
+# A tile is at most ~a quarter of the screen height, so 720p is plenty and
+# cheap; prefer MJPEG at that size — raw YUYV at 720p is often capped at 10fps
+# on USB cameras.
+fmts=$(v4l2-ctl --list-formats-ext -d "$dev" 2>/dev/null)
+size=""
+for r in 1280x720 1920x1080 640x480 640x360; do
+  case "$fmts" in *"$r"*) size=$r; break ;; esac
+done
+opts="framerate=30"
+[ -n "$size" ] && opts="video_size=$size,$opts"
+if awk -v r="$size" '/\[[0-9]+\]:/{f=$2} /Size/ && $3==r && f ~ /MJPG/ {found=1} END{exit !found}' <<<"$fmts"; then
+  opts="input_format=mjpeg,$opts"
+fi
+
+exec mpv "av://v4l2:$dev" \
+  --profile=low-latency --untimed --no-cache \
+  --demuxer-lavf-o="$opts" \
+  '--vf=lavfi=[crop=min(iw\,ih):min(iw\,ih),hflip]' \
+  --title=tuple-selfcam --wayland-app-id=tuple-selfcam \
+  --keepaspect-window=yes --no-border --no-audio --no-osc --osd-level=0 \
+  --no-input-default-bindings --input-cursor=no --cursor-autohide=always \
+  --really-quiet

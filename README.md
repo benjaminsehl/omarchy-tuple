@@ -55,24 +55,91 @@ panels, so it picks up your theme, fonts, borders and keyboard conventions.
 
 ## Webcams
 
-- **Their webcam:** it shows as a floating picture-in-picture in the
-  bottom-right corner. The static rule covers the `tuple-webcams` Wayland app
-  ID. In practice Tuple opens the webcam window over X11, where it's just
-  class `Tuple`, so `bin/tuple-pip` does the same thing at runtime when the
-  daemon logs `webcam: added feed`. It stays on every workspace, never steals focus, and
-  keeps its shape when resized. Drag it with `SUPER` + left mouse and resize it
-  with `SUPER` + right mouse. The rule is in `hypr/tuple.lua`, which also
-  floats and centres Tuple's small prompts (incoming call, join request,
-  errors).
-- **Your webcam:** Tuple for Linux can't send webcam video yet. In
-  v2026_09_16.1 the capture code is still a TODO (`WebcamCapturerAdapter:
-  TODO: implement Start`), and there's no command for it. Until it ships, the
-  **Camera** button (`v`) opens Omarchy's own floating camera overlay, the one
-  `omarchy capture screenrecording --with-webcam` uses. Your peer sees you
-  whenever you share your screen. The overlay closes when the call ends.
-  - **Settings:** `cameraDevice` (blank uses the first camera from
-    `omarchy-capture-webcam-list`), `cameraSize` (`small`/`medium`/`large`),
-    and `cameraFollowsCall`.
+- **The camera stage.** Their webcam and your camera sit together as equal
+  squares in the bottom-right corner, yours on the right and mirrored. They
+  stay on every workspace and never take focus. `cameraSize`
+  (`small`/`medium`/`large`) sets the tile size for both.
+- **How it works.** Tuple draws all its windows over X11 with class `Tuple`
+  and no title. Each window's `WM_CLASS` instance names its role, though
+  (`tuple-webcams`, `tuple-screen`, `tuple-join-request`, …).
+  `bin/tuple-windows` copies that role into the window title, then floats
+  and centres Tuple's prompts and lays out the stage. The panel runs it
+  whenever Tuple logs `map window:`/`unmap window:` or your camera turns on
+  or off. `hypr/tuple.lua` makes Tuple's windows fully opaque, because
+  Omarchy's default translucency doesn't belong on video.
+- **Your camera can't reach them on its own.** In v2026_09_16.1, Tuple for
+  Linux can't send webcam video: `WebcamCapturerAdapter: TODO: implement
+  Start`, and it rejects `ShareWebcamRequest`. Your tile
+  (`bin/tuple-selfcam`) is a local view that reaches them only through your
+  screen share. The panel says so while the camera is on and you aren't
+  sharing.
+  - **Choosing a camera:** the Camera button is a split button. The main part
+    turns your tile on or off, and the caret (or `Shift+V`) opens a menu:
+    **System default** (the first camera, named in the menu), then each
+    camera. A chosen camera is saved by name, since `/dev/videoN` numbers
+    change between boots. If it isn't plugged in, the default is used.
+  - The tile uses 720p, and MJPEG when the camera offers it, because raw 720p
+    over USB is often capped at 10fps.
+
+## Their screen
+
+When they share, the panel shows a **Their screen** row:
+
+- **View** brings Tuple's screen window forward.
+- **Control** switches between drawing on their screen and driving it
+  (Tuple's `guest-mode` setting: `annotation` or `control`).
+
+When someone asks to join your call, you get a desktop notification, and
+Tuple's prompt is centred and focused.
+
+## Notifications Tuple doesn't post yet
+
+Tuple's own toasts for these are stubs on Linux (`TODO: implement …` in the
+log), so the panel posts them instead:
+
+- **Join requests:** critical, with a **Show** button that focuses Tuple's
+  prompt.
+- **Someone joined:** a 4-second toast (`notifyJoins`).
+- **Everyone left:** your link call stays open after the last person leaves.
+  About 15s later you get "Everyone left" with an **End call** button.
+
+## Reliability
+
+- **No stuck buttons:** every `tuple` command has a time limit (20s for most,
+  45s for `ls`/`settings`/`on`/`off`, 90s for login, 120s for `call`). A
+  wedged daemon shows an error and frees the button.
+- **No leaked helpers:** the log follower and the mic router exit together
+  with their child processes (`tail --pid`, and a process substitution with
+  an exit trap) instead of leaving them orphaned.
+- **Ending is immediate:** a call counts as over as soon as Tuple logs
+  `invalidating call`, without waiting for the grace period.
+- **Less noise:** while someone shares, Tuple logs every move of their cursor
+  (about 99% of a call's log). The follower drops those lines before they
+  reach QML.
+- **Log archive:** only new, complete lines are copied, with an offset kept
+  per file. Tuple's auth token is redacted on the way.
+- **Throttled refresh:** opening the panel refreshes at most every 15s.
+  `r`, middle-click and IPC `refresh` always force a refresh.
+
+## Performance notes
+
+Tuple renders over X11, so every frame of their screen and webcam crosses into
+XWayland. Video translucency is off for Tuple's windows. During calls,
+`bin/tuple-perf` appends a sample every 20s to
+`~/.local/state/omarchy-tuple/perf.log`: CPU for Tuple, XWayland, the shell
+and your camera tile, plus the size of their screen and webcam windows. If
+video stutters, that log shows where the time goes. Turn it off with
+`perfLog`.
+
+## Microphone
+
+The Mic button is a split button too. The main part mutes and unmutes, and the
+caret (or `Shift+M`) picks the input: **System default** (PipeWire's default
+source, named in the menu) or a specific mic. Tuple for Linux has no input
+setting and records from the default source, so a specific mic is applied by
+moving Tuple's own recording stream to it (`bin/tuple-mic-route`, via
+`pactl move-source-output`) for as long as the call lasts. The system default
+isn't changed. Saved as `micDevice`; blank means system default.
 
 ## Requirements
 
@@ -80,7 +147,7 @@ panels, so it picks up your theme, fonts, borders and keyboard conventions.
 - The Tuple CLI from [tuple.app/linux](https://tuple.app/linux/) on your
   `PATH`; `~/.local/bin` and `~/bin` are checked too
 - `socat`, `jq`, `hyprctl`, `wl-copy` and `notify-send`
-- For the camera overlay: `mpv` and `v4l2-ctl`. Omarchy ships these.
+- For the camera overlay: `mpv` and `v4l2-ctl`. For mic selection: `pactl`. Omarchy ships these.
 
 ## Install
 
@@ -131,6 +198,9 @@ selected row. Other keys:
 ```bash
 omarchy-shell sehl.tuple toggle | toggleMute | toggleShare | toggleCamera | end | newCall | joinClipboard | copyLink | on | off
 omarchy-shell sehl.tuple join https://tuple.app/c/xyz
+omarchy-shell sehl.tuple cameras       # list cameras; camera <name|number|default> picks one
+omarchy-shell sehl.tuple mics          # list mics;    mic <name|number|default> picks one
+omarchy-shell sehl.tuple deviceMenu mic   # open the panel with the mic (or camera) menu
 omarchy-shell sehl.tuple status        # JSON: daemon, loggedIn, call, peers, muted, sharing, …
 omarchy-shell sehl.tuple demo call     # canned UI states: call | idle | incoming | login | off (back to live)
 ```
@@ -199,11 +269,20 @@ binary's strings. They are the basis of `Model.js`.
   `mute`/`unmute` replies, the `start-calls-muted` setting, and the call
   starting. If you mute from a terminal, the widget won't know.
 - **Partly verified:** call state is calibrated against one real call (peers,
-  screen share, their webcam, ending). Answering an incoming call and the
-  runtime webcam PiP haven't been seen live yet. `omarchy-shell sehl.tuple
+  screen share, their webcam, ending). Answering an incoming call, the camera
+  stage with a real peer webcam, the Their screen row and mic routing haven't
+  been seen live yet. `omarchy-shell sehl.tuple
   status` shows what the widget currently believes.
-- **Calling restrictions:** you can only call online favourites, because
-  that's all `tuple call` offers. Star someone to make them callable.
+- **Calling restrictions:** `tuple call` only offers online favourites. The
+  call button works for anyone who's online: for someone who isn't a
+  favourite, it stars them first, and the tooltip says so. Clicking the row
+  itself only rings favourites, so a stray click can't ring someone new.
+- **Ringing:** `tuple call` adds the callee as a peer before they answer. The
+  widget shows "Calling X…" until `call connected` (or the call's audio
+  context) appears. If nobody answers in ~25s, the engine logs
+  `OnPeerRemoved (… reason=timeout)`, and the widget tells you they didn't
+  answer. A call that's answered has only been seen through call links. If a
+  direct call doesn't connect, use **New call** and send the link.
 
 ## Develop
 
@@ -221,7 +300,12 @@ Files:
 - `TupleIcon.qml`: the logo.
 - `bin/tuple-request`: talks to the daemon socket directly, for complete
   replies and without starting the daemon.
-- `bin/tuple-pip`: floats Tuple's X11 webcam window as a picture-in-picture.
+- `bin/tuple-windows`: names Tuple's X11 windows, centres its prompts, and
+  lays out the camera stage.
+- `bin/tuple-selfcam`: your camera as a square, mirrored tile.
+- `bin/tuple-mic-route`: keeps Tuple's recording stream on your chosen mic.
+- `bin/tuple-perf`: one line of call performance for `perf.log`.
+- `DeviceMenu.qml`: the Mic/Camera split-button menu.
 - `hypr/tuple.lua`: Hyprland window rules.
 - `docs/screenshots/`: screenshots for this README, captured with `demo` mode.
 

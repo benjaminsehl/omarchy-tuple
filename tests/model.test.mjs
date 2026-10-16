@@ -217,3 +217,127 @@ test("audio context teardown and peer removal", () => {
   s = M.reduceLogText("19:50:00.100|2520219|2803146|info|ContextState: TERMINATED\n", s)
   assert.equal(s.call, "idle")
 })
+
+// Today's log: `tuple call` to a favourite who never picked up (ids only).
+const UNANSWERED = `16:16:53.823|1120318|1120318|info|Engine.cpp:715|cli: call
+16:16:54.107|1120318|1120323|info|Caller.cpp:160|creating offer
+16:16:54.108|1120318|1120318|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 162751 cursor_mode=0 persist_paint=false)
+16:16:54.109|1120318|1120318|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 162751 cursor_mode=0 persist_paint=false)
+16:17:19.130|1120318|1120323|info|Call.cpp:750|removing peer from call: timeout (connection_state=kNew, exchange_count=0)
+16:17:19.130|1120318|1120318|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 162751 cursor_mode=0 persist_paint=false)
+16:17:19.132|1120318|1120318|info|Engine.cpp:757|EngineEvent: OnPeerRemoved (peer 162751 reason=timeout '')
+16:17:19.132|1120318|1120318|info|peer 162751 removed (Timeout)
+16:17:19.133|1120318|1120323|info|Call.cpp:3152|sfu closed
+`
+
+test("outgoing call rings (not 'pairing') and ends as unanswered", () => {
+  const lines = UNANSWERED.split("\n")
+  let s = M.reduceLogText(lines.slice(0, 4).join("\n"))
+  assert.equal(s.call, "connecting")
+  assert.equal(s.outgoing, true)
+  assert.deepEqual([...s.peers], ["162751"])
+  assert.equal(M.statusLabel({ daemon: true, loggedIn: true, call: s.call, peers: ["David"], outgoing: s.outgoing }), "Calling David…")
+  s = M.reduceLogText(UNANSWERED)
+  assert.equal(s.call, "idle")
+  assert.equal(s.unanswered, "162751")
+  assert.deepEqual([...s.peers], [])
+})
+
+test("outgoing call that's answered becomes active", () => {
+  let s = M.reduceLogText(UNANSWERED.split("\n").slice(0, 4).join("\n") + "\n16:17:00.000|1120318|1120318|info|call connected\n")
+  assert.equal(s.call, "active")
+  assert.equal(s.outgoing, false)
+  assert.deepEqual([...s.peers], ["162751"])
+  s = M.reduceLogText(UNANSWERED.split("\n").slice(0, 4).join("\n") + "\n16:17:00.000|1120318|1120330|info|ContextState: READY\n")
+  assert.equal(s.call, "active")
+})
+
+test("abandoned `call` prompt resolves via the wall-clock fallback", () => {
+  const s = M.reduceLogText("16:16:53.823|1|1|info|Engine.cpp:715|cli: call\n")
+  assert.equal(s.call, "connecting")
+  assert.equal(M.resolveStaleOutgoing(s).call, "idle")
+})
+
+test("parseCameras / resolveCamera / nextCamera", () => {
+  const cams = M.parseCameras(`/dev/video50  Hardware ISP Camera (platform:v4l2loopback-050):
+/dev/video32  Opal C1: Opal C1 (usb-0000:00:0d.0-2.3):
+/dev/video34  Studio Display: Studio Display  (usb-0000:3f:00.0-1.4):
+`)
+  assert.deepEqual([...cams].map((c) => c.name), ["Hardware ISP Camera", "Opal C1", "Studio Display"])
+  assert.deepEqual([...cams].map((c) => c.dev), ["/dev/video50", "/dev/video32", "/dev/video34"])
+  assert.equal(M.resolveCamera(cams, "").name, "Hardware ISP Camera")
+  assert.equal(M.resolveCamera(cams, "studio display").dev, "/dev/video34")
+  assert.equal(M.resolveCamera(cams, "/dev/video32").name, "Opal C1")
+  assert.equal(M.resolveCamera(cams, "Unplugged Cam").name, "Hardware ISP Camera")
+  assert.equal(M.resolveCamera([], "x"), null)
+  assert.equal(M.nextCamera(cams, cams[2]).name, "Hardware ISP Camera")
+  assert.equal(M.nextCamera(cams, cams[0]).name, "Opal C1")
+})
+
+test("parseMics drops monitors and names the built-in array", () => {
+  const mics = M.parseMics(JSON.stringify([
+    { name: "alsa_output.usb-x.analog-stereo.monitor", description: "Monitor of X", properties: { "device.class": "monitor" } },
+    { name: "alsa_input.pci-0000_00_1f.3-platform-sof_sdw.HiFi__Mic__source", description: "Core Ultra Processors (Series 3) HD Audio Microphones", properties: { "device.class": "sound" } },
+    { name: "alsa_input.usb-Opal_Opal_C1-03.analog-stereo", description: "Opal C1 Analog Stereo", properties: { "device.class": "sound" } },
+    { name: "alsa_input.usb-teenage_engineering_CM-15-00.mono-fallback", description: "CM-15 Mono", properties: {} }
+  ]))
+  assert.deepEqual([...mics].map((m) => m.label), ["Built-in microphone", "Opal C1", "CM-15"])
+  assert.equal(M.findMic(mics, "alsa_input.usb-Opal_Opal_C1-03.analog-stereo").label, "Opal C1")
+  assert.equal(M.findMic(mics, ""), null)
+  assert.deepEqual([...M.parseMics("not json")], [])
+})
+
+test("findCamera is strict (no fallback), for 'is this the default?'", () => {
+  const cams = M.parseCameras("/dev/video50  Hardware ISP Camera (platform:x):\n/dev/video32  Opal C1: Opal C1 (usb-1):\n")
+  assert.equal(M.findCamera(cams, ""), null)
+  assert.equal(M.findCamera(cams, "Unplugged"), null)
+  assert.equal(M.findCamera(cams, "opal c1").dev, "/dev/video32")
+})
+
+// From a real v2026_09_16.1 call: they joined via link, turned on their
+// webcam, shared their screen, then left.
+const LINK_CALL = `17:36:10.214|3823643|3823643|info|call connected
+17:37:59.408|3823643|3823649|info|Call.cpp:2374|posting join request
+17:37:59.409|3823643|3823643|info|map window: join_request
+17:38:07.254|3823643|3823643|info|unmap window: join_request
+17:38:07.256|3823643|3823643|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 71792 cursor_mode=0 persist_paint=false)
+17:38:24.660|3823643|3823643|info|Engine.cpp:776|WebcamReceivingChange: add peer 71792
+17:38:24.661|3823643|3823643|info|map window: webcam
+17:39:59.066|3823643|3823643|info|ScreenShareWindow: screen 1920x1080 window-client 1920x1112
+17:39:59.067|3823643|3823643|info|map window: screen
+`
+
+test("their screen share and join requests come from Tuple's window log", () => {
+  const lines = LINK_CALL.split("\n")
+  let s = M.reduceLogText(lines.slice(0, 3).join("\n"))
+  assert.equal(s.joinRequest, true)
+  s = M.reduceLogText(LINK_CALL)
+  assert.equal(s.joinRequest, false)
+  assert.equal(s.call, "active")
+  assert.equal(s.peerWebcam, true)
+  assert.equal(s.peerSharing, "71792")
+  assert.deepEqual([...s.windows].sort(), ["screen", "webcam"])
+  s = M.reduceLogText("18:13:35.889|3823643|3823643|info|unmap window: screen\n18:13:35.889|3823643|3823643|info|unmap window: webcam\n", s)
+  assert.equal(s.peerSharing, "")
+  assert.deepEqual([...s.windows], [])
+})
+
+test("End resolves at once on Tuple's 'invalidating call', not 3s later", () => {
+  const s = M.reduceLogText(`17:36:10.214|1|1|info|call connected
+17:35:54.838|1|1|info|Engine.cpp:552|cli: end
+17:35:54.838|1|2|info|Caller.cpp:985|invalidating call
+`)
+  assert.equal(s.call, "idle")
+})
+
+test("participant joined and everyone-left (Tuple's TODO toasts) are tracked", () => {
+  let s = M.reduceLogText(LINK_CALL + "17:38:08.536|1|2|info|Call.cpp:2442|posting participant joined notification\n")
+  assert.equal(s.joined, "71792@17:38:08.536")
+  s = M.reduceLogText(`18:13:35.889|1|1|info|Engine.cpp:757|EngineEvent: OnPeerRemoved (peer 71792 reason=requested '')
+18:13:50.800|1|1|info|TODO: implement HangUpEveryoneLeft notification
+`, s)
+  assert.equal(s.everyoneLeft, true)
+  assert.equal(s.call, "active")
+  s = M.reduceLogText("18:14:00.000|1|1|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 71792 cursor_mode=0 persist_paint=false)\n", s)
+  assert.equal(s.everyoneLeft, false)
+})

@@ -65,6 +65,7 @@ Panel {
     }
     if (tuple.incoming) { keys.push("answer"); keys.push("decline") }
     if (tuple.inCall) {
+      if (tuple.log.peerSharing !== "") { keys.push("control"); keys.push("viewScreen") }
       keys.push("mute"); keys.push("share"); keys.push("camera")
       if (tuple.personalUrl !== "") keys.push("copyLink")
       keys.push("end")
@@ -121,6 +122,8 @@ Panel {
     else if (key === "mute") tuple.toggleMute()
     else if (key === "share") tuple.toggleShare()
     else if (key === "camera") tuple.toggleCamera()
+    else if (key === "control") tuple.setGuestMode(tuple.guestMode === "control" ? "annotation" : "control")
+    else if (key === "viewScreen") tuple.viewScreen()
     else if (key === "copyLink") tuple.copy(tuple.personalUrl, "Call link")
     else if (key === "end") tuple.endCall()
     else if (key === "pair") pair()
@@ -128,8 +131,38 @@ Panel {
     else if (key === "settings") settingsOpen = !settingsOpen
     else if (key === "debug") tuple.openDebugUi()
     else if (key === "logout") tuple.logout()
-    else if (key.indexOf("contact:") === 0) tuple.callContact(contactById(key.slice(8)))
+    else if (key.indexOf("contact:") === 0) callFromKeyboard(contactById(key.slice(8)))
     else if (key.indexOf("setting:") === 0) cycleSetting(settingByName(key.slice(8)))
+  }
+
+  // The split half of the Mic and Camera tiles: pick an input, or follow the
+  // system default.
+  function openDeviceMenu(kind, tile) {
+    if (deviceMenu.opened && deviceMenu.kind === kind) { deviceMenu.close(); return }
+    var anchor = tile || (kind === "mic" ? micTile : cameraTile)
+    if (kind === "mic") tuple.refreshMics(); else tuple.refreshCameras()
+    deviceMenu.kind = kind
+    deviceMenu.anchorTile = anchor
+    deviceMenu.open()
+  }
+
+  readonly property var micOptions: {
+    var opts = [{ value: "", label: "System default", detail: tuple.defaultMic !== "" ? (Model.findMic(tuple.mics, tuple.defaultMic) || { label: "" }).label : "" }]
+    for (var i = 0; i < tuple.mics.length; i++) opts.push({ value: tuple.mics[i].name, label: tuple.mics[i].label, detail: "" })
+    return opts
+  }
+
+  readonly property var cameraOptions: {
+    var opts = [{ value: "", label: "System default", detail: tuple.cameras.length > 0 ? tuple.cameras[0].name : "" }]
+    for (var i = 0; i < tuple.cameras.length; i++) opts.push({ value: tuple.cameras[i].name, label: tuple.cameras[i].name, detail: "" })
+    return opts
+  }
+
+  function callFromKeyboard(contact) {
+    if (!contact) return
+    if (tuple.inCall || tuple.incoming) { tuple.say("You're already in a call", true); return }
+    if (!contact.online) { tuple.say(contact.name + " isn't available", true); return }
+    tuple.callContact(contact)
   }
 
   function cycleSetting(s) {
@@ -146,14 +179,16 @@ Panel {
 
   function scrollToCursor() {
     Qt.callLater(function() {
-      var item = findNavItem(column, cursorKey)
-      if (!item || !panelFlick) return
-      var margin = Style.space(6)
-      var top = item.mapToItem(panelFlick.contentItem, 0, 0).y
+      // Only rows in the people list can be out of view.
+      var item = findNavItem(peopleColumn, cursorKey)
+      if (!item) return
+      var f = peopleFlick
+      f.cancelFlick()
+      var top = item.mapToItem(f.contentItem, 0, 0).y
       var bottom = top + item.height
-      var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
-      if (top < panelFlick.contentY + margin) panelFlick.contentY = Math.max(0, top - margin)
-      else if (bottom > panelFlick.contentY + panelFlick.height - margin) panelFlick.contentY = Math.min(maxY, bottom + margin - panelFlick.height)
+      var maxY = Math.max(0, f.contentHeight - f.height)
+      if (top < f.contentY) f.contentY = Math.max(0, top)
+      else if (bottom > f.contentY + f.height) f.contentY = Math.min(maxY, bottom - f.height)
     })
   }
 
@@ -180,7 +215,7 @@ Panel {
     if (opened) {
       cursorActive = false
       cursorKey = firstContentKey()
-      if (panelFlick) panelFlick.contentY = 0
+      if (peopleFlick) peopleFlick.contentY = 0
       tuple.refresh()
       refocusKeys()
     } else {
@@ -193,6 +228,18 @@ Panel {
   Service {
     id: tuple
     settings: root.settings
+    onSettingsChangeRequested: function(values) { root.persistSettings(values) }
+  }
+
+  // Same pattern as Omarchy's own panels: update the local copy so bindings
+  // move now, then write the bar entry so it survives a restart.
+  function persistSettings(values) {
+    var entry = { id: root.moduleName }
+    for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
+    for (var key in values) entry[key] = values[key]
+    root.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
   // A call link on the clipboard is almost certainly the one you're about to
@@ -211,7 +258,7 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function refresh(): string { tuple.refresh(); return "ok" }
+    function refresh(): string { tuple.refresh(true); return "ok" }
     function on(): string { tuple.turnOn(); return "ok" }
     function off(): string { tuple.turnOff(); return "ok" }
     function newCall(): string { tuple.newCall(); return "ok" }
@@ -224,6 +271,27 @@ Panel {
     function unshare(): string { tuple.setSharing(false); return "ok" }
     function toggleShare(): string { tuple.toggleShare(); return "ok" }
     function toggleCamera(): string { tuple.toggleCamera(); return tuple.cameraOn ? "on" : "off" }
+    function cameras(): string {
+      tuple.refreshCameras()
+      return tuple.cameras.map(function(c, i) {
+        return (i + 1) + ") " + c.name + "  " + c.dev + (tuple.camera && tuple.camera.dev === c.dev ? "  (selected)" : "")
+      }).join("\n")
+    }
+    function camera(query: string): string { tuple.selectCamera(query); return tuple.camera ? tuple.camera.name : "" }
+    function cycleCamera(): string { tuple.cycleCamera(); return tuple.camera ? tuple.camera.name : "" }
+    function mics(): string {
+      tuple.refreshMics()
+      return tuple.mics.map(function(m, i) {
+        return (i + 1) + ") " + m.label + "  " + m.name + (m.name === tuple.defaultMic ? "  (system default)" : "") + (!tuple.micIsDefault && tuple.mic && tuple.mic.name === m.name ? "  (selected)" : "")
+      }).join("\n")
+    }
+    function deviceMenu(kind: string): string {
+      if (!tuple.inCall) return "not in a call"
+      root.open()
+      Qt.callLater(function() { root.openDeviceMenu(kind === "camera" ? "camera" : "mic") })
+      return "ok"
+    }
+    function mic(query: string): string { tuple.selectMic(query); return tuple.micIsDefault ? "default" : (tuple.mic ? tuple.mic.label : "") }
     function end(): string { tuple.endCall(); return "ok" }
     function demo(scenario: string): string { return tuple.setDemo(scenario) }
     function copyLink(): string { tuple.copy(tuple.personalUrl, "Call link"); return tuple.personalUrl }
@@ -231,7 +299,9 @@ Panel {
       return JSON.stringify({
         installed: tuple.installed, daemon: tuple.daemon, loggedIn: tuple.loggedIn,
         call: tuple.call, peers: tuple.peerNames, peerIds: tuple.peers, muted: tuple.muted, sharing: tuple.sharing,
-        peerWebcam: tuple.log.peerWebcam, camera: tuple.cameraOn, lastEvent: tuple.log.lastEvent,
+        peerWebcam: tuple.log.peerWebcam, camera: tuple.cameraOn,
+        cameraDevice: tuple.cameraIsDefault ? "default" : (tuple.camera ? tuple.camera.name : ""),
+        micDevice: tuple.micIsDefault ? "default" : (tuple.mic ? tuple.mic.label : ""), lastEvent: tuple.log.lastEvent,
         incomingFrom: tuple.log.incomingFrom, signaler: tuple.log.signaler,
         version: tuple.log.version, personalUrl: tuple.personalUrl, text: tuple.statusText
       })
@@ -265,7 +335,7 @@ Panel {
         else root.toggle()
       } else if (b === Qt.MiddleButton) {
         if (tuple.inCall) tuple.toggleShare()
-        else tuple.refresh()
+        else tuple.refresh(true)
       } else {
         root.toggle()
       }
@@ -287,7 +357,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: pairField.activeFocus || authField.activeFocus || searchField.activeFocus
+      blocked: pairField.activeFocus || authField.activeFocus || searchField.activeFocus || deviceMenu.opened
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dx, dy)
@@ -296,6 +366,8 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
+        if (t === "M" && tuple.inCall) { root.openDeviceMenu("mic"); return }
+        if (t === "V" && tuple.inCall) { root.openDeviceMenu("camera"); return }
         var k = t.toLowerCase()
         if (k === "m" && tuple.inCall) tuple.toggleMute()
         else if (k === "s" && tuple.inCall) tuple.toggleShare()
@@ -308,27 +380,25 @@ Panel {
         else if (k === "/" && tuple.contacts.length > 0) root.focusField(searchField)
         else if (k === "f" && root.cursorKey.indexOf("contact:") === 0) tuple.toggleFavorite(root.contactById(root.cursorKey.slice(8)))
         else if (k === "o") tuple.toggleDaemon()
-        else if (k === "r") tuple.refresh()
+        else if (k === "r") tuple.refresh(true)
       }
 
-      Flickable {
-        id: panelFlick
+      // Only the people list scrolls. Everything above it (status, call
+      // controls, the join field, search) and below it (settings, footer)
+      // stays put; the list takes whatever height is left and shrinks first
+      // when the panel is capped by the screen.
+      ColumnLayout {
+        id: column
         anchors.fill: parent
-        contentWidth: width
-        contentHeight: column.implicitHeight
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        flickableDirection: Flickable.VerticalFlick
-        interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        spacing: 0
 
         Column {
-          id: column
-          width: panelFlick.width
+          id: topColumn
+          Layout.fillWidth: true
+          Layout.preferredHeight: implicitHeight
+          Layout.minimumHeight: implicitHeight
+          Layout.maximumHeight: implicitHeight
           spacing: Style.space(12)
-          // Room for the last row's keys to stand on their lips; the
-          // Flickable clips at its edge.
-          bottomPadding: depthTheme.on ? Style.space(3) : 0
 
           // ── Hero ──────────────────────────────────────────────────────
           Item {
@@ -473,8 +543,51 @@ Panel {
                 required property var modelData
                 width: parent.width
                 name: tuple.peerName(modelData)
-                caption: tuple.log.peerSharing === String(modelData) ? "Sharing their screen"
+                caption: tuple.log.outgoing ? "Ringing…"
+                  : tuple.log.peerSharing === String(modelData) ? "Sharing"
                   : (tuple.log.peerWebcam ? "Camera on" : "")
+              }
+            }
+
+            // ── Their screen: open it, and choose draw or drive ──────────
+            RowLayout {
+              visible: tuple.log.peerSharing !== ""
+              x: Style.space(6)
+              width: parent.width - Style.space(6)
+              spacing: Style.space(10)
+
+              Text {
+                Layout.fillWidth: true
+                text: "Their screen"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+              }
+
+              Text {
+                text: "Control"
+                color: tuple.guestMode === "control" ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              ToggleSwitch {
+                property string navKey: "control"
+                checked: tuple.guestMode === "control"
+                hasCursor: root.hasCursor("control")
+                foreground: root.foreground
+                Layout.alignment: Qt.AlignVCenter
+                onToggled: tuple.setGuestMode(tuple.guestMode === "control" ? "annotation" : "control")
+              }
+
+              KeyButton {
+                property string navKey: "viewScreen"
+                text: "View"
+                tooltipText: "Bring their screen forward"
+                selected: root.hasCursor("viewScreen")
+                fontFamily: root.fontFamily
+                onClicked: tuple.viewScreen()
               }
             }
 
@@ -485,10 +598,14 @@ Panel {
               readonly property real tileWidth: (width - spacing * (tiles - 1)) / tiles
 
               ControlTile {
+                id: micTile
                 navKey: "mute"; width: parent.tileWidth
                 glyph: tuple.muted ? "󰍭" : "󰍬"
                 label: tuple.muted ? "Muted" : "Mic on"
-                tooltip: (tuple.muted ? "Unmute" : "Mute") + " (m)"
+                tooltip: (tuple.muted ? "Unmute" : "Mute") + " (m) · " + (tuple.mic ? tuple.mic.label : "System default")
+                split: true
+                menuOpen: deviceMenu.opened && deviceMenu.kind === "mic"
+                onMenuRequested: root.openDeviceMenu("mic", micTile)
                 checked: tuple.muted
                 busy: tuple.isPending("mute") || tuple.isPending("unmute")
                 onActivated: tuple.toggleMute()
@@ -503,11 +620,15 @@ Panel {
                 onActivated: tuple.toggleShare()
               }
               ControlTile {
+                id: cameraTile
                 navKey: "camera"; width: parent.tileWidth
                 glyph: tuple.cameraOn ? "󰖠" : "󱜷"
                 label: "Camera"
-                tooltip: tuple.cameraOn ? "Hide your camera (v)"
-                  : "Show your camera on your shared screen (v) — Tuple for Linux can't send webcam video yet"
+                tooltip: (tuple.cameraOn ? "Hide your camera (v)" : "Show your camera on your shared screen (v) — Tuple for Linux can't send webcam video yet")
+                  + (tuple.camera ? " · " + tuple.camera.name : "")
+                split: tuple.cameras.length > 0
+                menuOpen: deviceMenu.opened && deviceMenu.kind === "camera"
+                onMenuRequested: root.openDeviceMenu("camera", cameraTile)
                 checked: tuple.cameraOn
                 onActivated: tuple.toggleCamera()
               }
@@ -525,6 +646,28 @@ Panel {
                 busy: tuple.isPending("end")
                 onActivated: tuple.endCall()
               }
+            }
+
+            Hint {
+              visible: tuple.cameraOn && !tuple.sharing
+              font.pixelSize: Style.font.caption
+              text: "Only you can see your camera. Tuple for Linux can't send video yet, so they'll see it when you share your screen."
+            }
+
+            DeviceMenu {
+              id: deviceMenu
+              property string kind: ""     // "mic" | "camera"
+              heading: kind === "mic" ? "MICROPHONE" : "CAMERA"
+              options: kind === "mic" ? root.micOptions : root.cameraOptions
+              value: kind === "mic"
+                ? (tuple.micIsDefault ? "" : tuple.micDevice)
+                : (tuple.cameraIsDefault ? "" : (tuple.camera ? tuple.camera.name : ""))
+              foreground: root.foreground
+              mutedColor: root.dim
+              hoverFill: root.hoverFill
+              fontFamily: root.fontFamily
+              onPicked: function(v) { if (kind === "mic") tuple.chooseMic(v); else tuple.chooseCameraName(v) }
+              onClosed: root.refocusKeys()
             }
           }
 
@@ -603,7 +746,7 @@ Panel {
               hasCursor: root.hasCursor("search")
               placeholderText: "Search people"
               text: root.contactQuery
-              onTextChanged: root.contactQuery = text
+              onTextChanged: { root.contactQuery = text; peopleFlick.contentY = 0 }
               onAccepted: {
                 if (root.shownContacts.length > 0) { root.cursorActive = true; root.cursorKey = "contact:" + root.shownContacts[0].id }
                 root.refocusKeys()
@@ -612,7 +755,34 @@ Panel {
               Keys.onDownPressed: { if (root.shownContacts.length > 0) { root.cursorActive = true; root.cursorKey = "contact:" + root.shownContacts[0].id }; root.refocusKeys() }
             }
 
-            Item { width: 1; height: Style.space(2) }
+          }
+        }
+
+        Flickable {
+          id: peopleFlick
+          visible: tuple.loggedIn && root.shownContacts.length > 0
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          Layout.topMargin: Style.space(8)
+          Layout.preferredHeight: contentHeight
+          Layout.maximumHeight: contentHeight
+          Layout.minimumHeight: Math.min(contentHeight, Style.space(120))
+          contentWidth: width
+          contentHeight: peopleColumn.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          flickableDirection: Flickable.VerticalFlick
+          // Qt's own wheel handling is velocity-smoothed and feels sticky;
+          // PeopleScroller below maps wheel and touchpad input directly.
+          interactive: false
+          flickDeceleration: Style.space(2500)
+          maximumFlickVelocity: Style.space(6000)
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: peopleColumn
+            width: peopleFlick.width
+            spacing: Style.space(6)
 
             Repeater {
               model: root.shownContacts
@@ -622,6 +792,27 @@ Panel {
                 contact: modelData
               }
             }
+          }
+
+          PeopleScroller { flick: peopleFlick }
+        }
+
+        Column {
+          id: bottomColumn
+          Layout.fillWidth: true
+          Layout.topMargin: Style.space(peopleFlick.visible ? 12 : 8)
+          Layout.preferredHeight: implicitHeight
+          Layout.minimumHeight: implicitHeight
+          Layout.maximumHeight: implicitHeight
+          spacing: Style.space(12)
+          // Room for the last row's keys to stand on their lips.
+          bottomPadding: depthTheme.on ? Style.space(3) : 0
+
+          Column {
+            visible: tuple.loggedIn && (root.shownContacts.length === 0
+              || (root.contactQuery !== "" && root.shownContacts.length >= root.contactLimit))
+            width: parent.width
+            spacing: Style.space(6)
 
             Hint {
               visible: root.shownContacts.length === 0
@@ -684,6 +875,64 @@ Panel {
   }
 
   // ── Components ──────────────────────────────────────────────────────────
+
+  // Wheel and touchpad scrolling for the people list.
+  //  * Touchpads (pixelDelta) move the list 1:1 with your fingers, and keep
+  //    gliding when you lift them (Wayland sends a zero-delta "scroll end").
+  //  * Mouse wheels move about two rows per notch, eased over a short glide.
+  component PeopleScroller: WheelHandler {
+    id: scroller
+    required property Flickable flick
+    property real velocity: 0        // px/s, same sign as pixelDelta
+    property real lastAt: 0
+    readonly property real notch: Style.space(80)
+
+    target: null
+    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+    function maxY() { return Math.max(0, flick.contentHeight - flick.height) }
+    function clampY(y) { return Math.max(0, Math.min(maxY(), y)) }
+
+    onWheel: function(event) {
+      event.accepted = true
+      if (maxY() <= 0) return
+      var now = Date.now()
+      var px = event.pixelDelta.y
+      var ang = event.angleDelta.y
+
+      if (px === 0 && ang === 0) {
+        // Fingers lifted: carry on with the speed they had.
+        if (now - lastAt < 80 && Math.abs(velocity) > Style.space(150)) flick.flick(0, velocity)
+        velocity = 0
+        return
+      }
+
+      flick.cancelFlick()
+      if (px !== 0) {
+        glide.stop()
+        var dt = Math.max(1, now - lastAt)
+        var v = px * 1000 / dt
+        velocity = now - lastAt > 100 ? v : velocity * 0.4 + v * 0.6
+        lastAt = now
+        flick.contentY = clampY(flick.contentY - px)
+        return
+      }
+
+      // Notched wheel: stack quick notches onto the glide's target.
+      var from = glide.running ? glide.to : flick.contentY
+      glide.stop()
+      glide.from = flick.contentY
+      glide.to = clampY(from - ang / 120 * notch)
+      glide.start()
+    }
+
+    property NumberAnimation glide: NumberAnimation {
+      target: scroller.flick
+      property: "contentY"
+      duration: 140
+      easing.type: Easing.OutCubic
+    }
+  }
 
   component Hint: Text {
     width: parent ? parent.width : implicitWidth
@@ -847,6 +1096,12 @@ Panel {
     property bool checked: false
     property bool alert: false
     property bool busy: false
+    // Split tile: the main face toggles; the narrow strip on the right opens
+    // a device menu (menuRequested).
+    property bool split: false
+    property bool menuOpen: false
+    signal menuRequested()
+    readonly property real splitWidth: split ? Style.space(18) : 0
     readonly property color tint: alert ? root.urgent : (checked ? root.foreground : root.foreground)
 
     hasCursor: root.hasCursor(navKey)
@@ -878,14 +1133,57 @@ Panel {
     MouseArea {
       id: tileMouse
       anchors.fill: parent
+      anchors.rightMargin: tile.splitWidth
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: root.hover(tile.navKey)
       onClicked: tile.activated()
     }
 
+    // The split: a hairline and a caret. Hovering it lights it on its own.
+    Item {
+      id: splitStrip
+      visible: tile.split
+      width: tile.splitWidth
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      anchors.right: parent.right
+
+      Rectangle {
+        width: 1
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.topMargin: Style.space(12)
+        anchors.bottomMargin: Style.space(12)
+        color: root.foreground
+        opacity: splitMouse.containsMouse || tile.menuOpen ? 0.35 : 0.15
+      }
+
+      Text {
+        anchors.centerIn: parent
+        anchors.horizontalCenterOffset: Style.space(1)
+        text: "󰅀"
+        rotation: tile.menuOpen ? 180 : 0
+        Behavior on rotation { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+        color: splitMouse.containsMouse || tile.menuOpen ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      MouseArea {
+        id: splitMouse
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onEntered: root.hover(tile.navKey)
+        onClicked: tile.menuRequested()
+      }
+    }
+
     Column {
       anchors.centerIn: parent
+      anchors.horizontalCenterOffset: -tile.splitWidth / 2
       spacing: Style.space(4)
 
       Text {
@@ -913,7 +1211,7 @@ Panel {
     }
 
     PanelToolTip {
-      visible: tile.tooltip !== "" && tileMouse.containsMouse
+      visible: tile.tooltip !== "" && tileMouse.containsMouse && !tile.menuOpen
       text: tile.tooltip
       fontFamily: root.fontFamily
     }
@@ -989,7 +1287,9 @@ Panel {
     id: contactRow
     property var contact: null
     readonly property string navKey: contact ? "contact:" + contact.id : ""
-    readonly property bool callable: contact && contact.favorite && contact.online && !tuple.inCall && !tuple.incoming
+    // Tuple for Linux can only ring favourites; calling someone else stars
+    // them first (Service.callContact).
+    readonly property bool callable: contact && contact.online && !tuple.inCall && !tuple.incoming
     readonly property bool revealed: hasCursor || rowMouse.containsMouse
     readonly property string presence: contact ? Model.presenceLabel(contact.status) : ""
 
@@ -1002,9 +1302,11 @@ Panel {
       id: rowMouse
       anchors.fill: parent
       hoverEnabled: true
-      cursorShape: contactRow.callable ? Qt.PointingHandCursor : Qt.ArrowCursor
+      // A click on the row only rings favourites; anyone else takes the
+      // explicit call button (which stars them first).
+      cursorShape: contactRow.callable && contactRow.contact.favorite ? Qt.PointingHandCursor : Qt.ArrowCursor
       onEntered: root.hover(contactRow.navKey)
-      onClicked: if (contactRow.callable) tuple.callContact(contactRow.contact)
+      onClicked: if (contactRow.callable && contactRow.contact.favorite) tuple.callContact(contactRow.contact)
     }
 
     RowLayout {
@@ -1053,9 +1355,8 @@ Panel {
       PanelActionButton {
         visible: contactRow.revealed
         iconText: "󰏲"
-        tooltipText: contactRow.callable ? "Call"
-          : (tuple.inCall ? "You're already in a call"
-          : (contactRow.contact && !contactRow.contact.favorite ? "Star to call — Tuple only calls favorites" : "Not available"))
+        tooltipText: contactRow.callable ? (contactRow.contact.favorite ? "Call" : "Call (adds them to your favorites — Tuple for Linux only calls favorites)")
+          : (tuple.inCall ? "You're already in a call" : "Not available")
         enabled: contactRow.callable && !tuple.isPending("call")
         foreground: root.foreground
         fontFamily: root.fontFamily

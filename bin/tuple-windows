@@ -1,0 +1,114 @@
+#!/bin/bash
+# tuple-windows — give Tuple's windows a home in Hyprland.
+#
+# Tuple v2026_09_16.1 draws every window over X11 (XWayland), all with class
+# "Tuple" and no title, so Hyprland rules can't tell the webcam bubble from a
+# join prompt from their shared screen. Each window's WM_CLASS *instance* does
+# name its role, though (tuple-webcams, tuple-screen, tuple-join-request, …).
+# This script:
+#
+#   1. copies that role into the window's title (any X client may set
+#      WM_NAME on any window), so Hyprland — and you — can see what it is;
+#   2. floats and centres Tuple's prompts, focusing the ones that want a click;
+#   3. lays out the camera "stage": their webcam(s) and your own camera
+#      (bin/tuple-selfcam, app id tuple-selfcam) as equal squares side by side
+#      in the bottom-right corner, yours rightmost, pinned on every workspace.
+#
+# Usage: tuple-windows [size: small|medium|large] [passes]
+#   The panel runs it whenever Tuple maps/unmaps a window or your camera
+#   turns on/off. Windows appear a moment after the log line, so it makes a
+#   few passes over ~3s; every pass is idempotent.
+set -uo pipefail
+
+size="${1:-medium}"
+passes="${2:-8}"
+export DISPLAY="${DISPLAY:-:0}"
+
+case "$size" in
+  small) frac=14 ;;
+  large) frac=24 ;;
+  *)     frac=18 ;;
+esac
+gap=10
+margin=40
+
+dispatch() { hyprctl dispatch "$1" >/dev/null 2>&1; }
+
+# 1. Name Tuple's X11 windows after their role.
+name_windows() {
+  command -v xprop >/dev/null || return 0
+  local ids id cls inst name
+  ids=$(xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -o '0x[0-9a-f]*') || return 0
+  for id in $ids; do
+    cls=$(xprop -id "$id" WM_CLASS 2>/dev/null) || continue
+    [[ $cls == *'"Tuple"'* ]] || continue
+    inst=$(sed -n 's/^WM_CLASS(STRING) = "\([^"]*\)".*/\1/p' <<<"$cls")
+    [ -n "$inst" ] || continue
+    name=$(xprop -id "$id" -notype _NET_WM_NAME 2>/dev/null)
+    [[ $name == *"\"$inst\""* ]] && continue
+    xprop -id "$id" -f _NET_WM_NAME 8u -set _NET_WM_NAME "$inst" 2>/dev/null
+    xprop -id "$id" -f WM_NAME 8s -set WM_NAME "$inst" 2>/dev/null
+  done
+}
+
+# 2 + 3. Place what's there.
+arrange() {
+  local clients monitors
+  clients=$(hyprctl clients -j 2>/dev/null) || return 0
+  monitors=$(hyprctl monitors -j 2>/dev/null) || return 0
+
+  # Prompts: float + centre once; focus the ones that need an answer.
+  jq -r '.[] | select(.class == "Tuple" or (.class | startswith("tuple-")))
+         | select(.title | test("^tuple-(incoming-call|join-request|error|external-url|main)$"))
+         | select(.floating | not) | "\(.address) \(.title)"' <<<"$clients" |
+  while read -r address title; do
+    local sel="address:$address"
+    dispatch "hl.dsp.window.float({ action = \"set\", window = \"$sel\" })"
+    dispatch "hl.dsp.window.center({ window = \"$sel\" })"
+    case "$title" in
+      tuple-incoming-call|tuple-join-request)
+        dispatch "hl.dsp.window.pin({ action = \"set\", window = \"$sel\" })"
+        dispatch "hl.dsp.focus({ window = \"$sel\" })" ;;
+    esac
+  done
+
+  # The stage, ordered: their webcams, then yours (rightmost).
+  mapfile -t tiles < <(jq -r '
+      [ .[] | select((.title == "tuple-webcams" and .class == "Tuple") or .class == "tuple-webcams") ]
+        | sort_by(.address) | .[] | "\(.address) \(.monitor) \(.at[0]) \(.at[1]) \(.size[0]) \(.size[1]) \(.floating) \(.pinned)"' <<<"$clients"
+    jq -r '.[] | select(.class == "tuple-selfcam")
+        | "\(.address) \(.monitor) \(.at[0]) \(.at[1]) \(.size[0]) \(.size[1]) \(.floating) \(.pinned)"' <<<"$clients")
+  local n=${#tiles[@]}
+  (( n > 0 )) || return 0
+
+  # All tiles go on the monitor of the first one.
+  local monitor mx my mw mh s i
+  read -r _ monitor _ <<<"${tiles[0]}"
+  read -r mx my mw mh < <(jq -r --argjson id "$monitor" \
+    '.[] | select(.id == $id) | "\(.x) \(.y) \((.width / .scale) | floor) \((.height / .scale) | floor)"' <<<"$monitors")
+  [ -n "${mw:-}" ] || return 0
+  s=$(( mh * frac / 100 ))
+
+  for (( i = 0; i < n; i++ )); do
+    local address mon ax ay w h floating pinned x y sel
+    read -r address mon ax ay w h floating pinned <<<"${tiles[$i]}"
+    x=$(( mx + mw - margin - (n - i) * s - (n - 1 - i) * gap ))
+    y=$(( my + mh - margin - s ))
+    sel="address:$address"
+    [ "$floating" = true ] || dispatch "hl.dsp.window.float({ action = \"set\", window = \"$sel\" })"
+    [ "$pinned" = true ] || dispatch "hl.dsp.window.pin({ action = \"set\", window = \"$sel\" })"
+    if (( w != s || h != s )); then
+      dispatch "hl.dsp.window.resize({ x = $s, y = $s, window = \"$sel\" })"
+    fi
+    if (( ax != x || ay != y )); then
+      dispatch "hl.dsp.window.move({ x = $x, y = $y, window = \"$sel\" })"
+    fi
+    dispatch "hl.dsp.window.set_prop({ prop = \"keep_aspect_ratio\", value = \"1\", window = \"$sel\" })"
+  done
+}
+
+for (( p = 0; p < passes; p++ )); do
+  name_windows
+  arrange
+  sleep 0.4
+done

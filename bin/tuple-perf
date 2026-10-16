@@ -1,0 +1,49 @@
+#!/bin/bash
+# tuple-perf — one line of call performance, appended to a log.
+#
+# Video stutter on Linux can come from several places: Tuple decoding and
+# drawing (it renders over X11, so every frame crosses into XWayland), the
+# compositor, or the network/sender. The panel runs this every 20s during a
+# call so there's evidence to look at afterwards:
+#
+#   time  tuple=%cpu  xwayland=%cpu  shell=%cpu  selfcam=%cpu  screen=WxH  webcam=WxH
+#
+# CPU is percent of one core over a 2s window. Window sizes are logical
+# pixels (Tuple's X11 windows render at physical size, scale × that).
+# Usage: tuple-perf [log-file]
+set -uo pipefail
+
+out="${1:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tuple/perf.log}"
+mkdir -p "$(dirname "$out")"
+hz=$(getconf CLK_TCK)
+
+ticks() {  # utime+stime of a pid, or empty
+  [ -n "$1" ] && [ -r "/proc/$1/stat" ] || return 0
+  awk '{ sub(/^.*\) /, ""); print $12 + $13 }' "/proc/$1/stat"
+}
+
+declare -A pid=(
+  [tuple]=$(pgrep -xo tuple)
+  [xwayland]=$(pgrep -xo Xwayland)
+  [shell]=$(pgrep -o -f '^quickshell .*omarchy/shell')
+  [selfcam]=$(pgrep -o -f 'title=tuple-selfcam')
+)
+declare -A t0
+for k in "${!pid[@]}"; do t0[$k]=$(ticks "${pid[$k]}"); done
+sleep 2
+line="$(date +%FT%T)"
+for k in tuple xwayland shell selfcam; do
+  t1=$(ticks "${pid[$k]}")
+  if [ -n "${t0[$k]}" ] && [ -n "$t1" ]; then
+    line+=" $k=$(( (t1 - t0[$k]) * 100 / (2 * hz) ))%"
+  else
+    line+=" $k=-"
+  fi
+done
+sizes=$(hyprctl clients -j 2>/dev/null | jq -r '
+  [.[] | select(.class == "Tuple" and (.title == "tuple-screen" or .title == "tuple-webcams"))
+       | "\(.title | sub("tuple-"; ""))=\(.size[0])x\(.size[1])\(if .fullscreen != 0 then "(full)" else "" end)"] | join(" ")')
+line+=" ${sizes:-}"
+echo "$line" >> "$out"
+# Keep it from growing without bound.
+if [ "$(wc -l < "$out")" -gt 5000 ]; then tail -n 4000 "$out" > "$out.tmp" && mv "$out.tmp" "$out"; fi

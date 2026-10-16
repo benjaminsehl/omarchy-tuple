@@ -22,11 +22,13 @@
       "refreshIntervalSec": 60,
       "copyLinkOnNewCall": true,
       "notifyIncoming": true,
+      "notifyJoins": true,
       "tupleCommand": "tuple",
       "cameraDevice": "",
+      "micDevice": "",
       "cameraSize": "medium",
       "cameraFollowsCall": true,
-      "webcamPip": true,
+      "perfLog": true,
       "archiveLogs": true
     },
     "schema": [
@@ -52,6 +54,12 @@
         "defaultValue": true
       },
       {
+        "key": "notifyJoins",
+        "type": "boolean",
+        "label": "Notify when someone joins your call",
+        "defaultValue": true
+      },
+      {
         "key": "tupleCommand",
         "type": "string",
         "label": "tuple command",
@@ -60,13 +68,19 @@
       {
         "key": "cameraDevice",
         "type": "string",
-        "label": "Camera device (blank: first from omarchy-capture-webcam-list)",
+        "label": "Camera (name or /dev path; blank: system default). Also from the Camera button's menu",
+        "defaultValue": ""
+      },
+      {
+        "key": "micDevice",
+        "type": "string",
+        "label": "Microphone (PulseAudio source name; blank: system default). Also from the Mic button's menu",
         "defaultValue": ""
       },
       {
         "key": "cameraSize",
         "type": "enum",
-        "label": "Camera overlay size",
+        "label": "Camera tile size (yours and theirs)",
         "options": [
           "small",
           "medium",
@@ -81,9 +95,9 @@
         "defaultValue": true
       },
       {
-        "key": "webcamPip",
+        "key": "perfLog",
         "type": "boolean",
-        "label": "Float peer webcams as a picture-in-picture",
+        "label": "Log CPU and window sizes during calls (~/.local/state/omarchy-tuple/perf.log)",
         "defaultValue": true
       },
       {

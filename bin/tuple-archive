@@ -1,0 +1,45 @@
+#!/bin/bash
+# tuple-archive — keep a rolling copy of Tuple's daemon logs.
+#
+# The daemon truncates its log on every start, and that log is the only record
+# of what a real call looked like. The panel runs this every 15s while Tuple is
+# on. Each daemon run gets its own file in
+# ~/.local/state/omarchy-tuple/logs/ (the last 20 runs are kept).
+#
+# It copies only what's new since the last pass (a call's log can run to
+# megabytes), whole lines only, and blanks the auth token Tuple writes into
+# its websocket URLs.
+#
+# Usage: tuple-archive [data-home]
+set -uo pipefail
+
+data="${1:-${XDG_DATA_HOME:-$HOME/.local/share}}"
+src=$(ls -t "$data"/tuple/*/log.txt 2>/dev/null | head -1)
+[ -n "$src" ] || exit 0
+dst="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tuple/logs"
+mkdir -p "$dst"
+
+pid=$(head -c 200 "$src" | head -1 | cut -d'|' -f2)
+[ -n "$pid" ] || exit 0
+out="$dst/$(date -r "$src" +%F)-$pid.log"
+mark="$out.offset"
+
+size=$(stat -c %s "$src")
+done=$(cat "$mark" 2>/dev/null || echo 0)
+# A pre-offset archive (or a restarted daemon reusing the pid): start over.
+if [ ! -f "$mark" ] || [ "$size" -lt "$done" ]; then done=0; : > "$out"; fi
+
+if [ "$size" -gt "$done" ]; then
+  chunk=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/tuple-archive.XXXXXX")
+  trap 'rm -f "$chunk"' EXIT
+  tail -c +$(( done + 1 )) "$src" | head -c $(( size - done )) > "$chunk"
+  # Leave an unfinished last line for the next pass.
+  lines=$(tr -dc '\n' < "$chunk" | wc -c)
+  if [ "$lines" -gt 0 ]; then
+    bytes=$(head -n "$lines" "$chunk" | wc -c)
+    head -c "$bytes" "$chunk" | sed -E 's/(auth_token=)[A-Za-z0-9_-]+/\1REDACTED/g' >> "$out"
+    echo $(( done + bytes )) > "$mark"
+  fi
+fi
+
+ls -t "$dst"/*.log 2>/dev/null | tail -n +21 | while read -r old; do rm -f -- "$old" "$old.offset"; done

@@ -46,13 +46,24 @@ Item {
   readonly property bool incoming: call === "incoming"
   readonly property bool sharing: inCall && log.sharing
   readonly property bool cameraOn: cameraProc.running
+  property var cameras: []                 // [{ dev, name }] from omarchy-capture-webcam-list
+  // Your chosen camera, or the first one when it isn't plugged in.
+  readonly property var camera: Model.resolveCamera(cameras, setting("cameraDevice", ""))
+  readonly property bool cameraIsDefault: String(setting("cameraDevice", "")) === "" || !Model.findCamera(cameras, setting("cameraDevice", ""))
+  // Microphones (PulseAudio/PipeWire sources). Blank `micDevice` follows the
+  // system default; otherwise Tuple's recording stream is moved to it.
+  property var mics: []                    // [{ name, label }]
+  property string defaultMic: ""           // source name of the system default
+  readonly property string micDevice: String(setting("micDevice", ""))
+  readonly property var mic: Model.findMic(mics, micDevice !== "" ? micDevice : defaultMic)
+  readonly property bool micIsDefault: micDevice === "" || !Model.findMic(mics, micDevice)
   readonly property var peers: daemon ? log.peers : []
   // The engine reports peers by contact id; show names where we know them.
   readonly property var peerNames: peers.map(function(p) { return root.peerName(p) })
   readonly property bool busy: Object.keys(pending).length > 0
   readonly property bool startCallsMuted: settingValue("start-calls-muted") === "1"
   readonly property string statusText: !installed ? "Tuple CLI not found" : Model.statusLabel({
-    daemon: daemon, loggedIn: loggedIn, call: call, peers: peerNames,
+    daemon: daemon, loggedIn: loggedIn, call: call, peers: peerNames, outgoing: log.outgoing,
     incomingFrom: log.incomingFrom, signaler: log.signaler
   })
 
@@ -61,6 +72,8 @@ Item {
   readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (Quickshell.env("HOME") + "/.local/share")
 
   signal personalUrlCopied(string url)
+  // Ask the host to persist plugin settings (Panel owns bar.shell).
+  signal settingsChangeRequested(var values)
 
   // ── Helpers ───────────────────────────────────────────────────────────
   function setting(name, fallback) {
@@ -127,6 +140,18 @@ Item {
     Quickshell.execDetached(["notify-send", "-a", "Tuple", "-i", "tuple", "-u", urgency || "normal", summary, body || ""])
   }
 
+  // A notification with one button; clicking it runs `command` (argv).
+  // notify-send -A blocks until the notification closes, so it runs detached.
+  function notifyAction(summary, body, urgency, label, command) {
+    Quickshell.execDetached(["bash", "-c",
+      "a=$(notify-send -a Tuple -i tuple -u \"$1\" -A go=\"$2\" \"$3\" \"$4\"); shift 4; [ \"$a\" = go ] && exec \"$@\"",
+      "notify", urgency || "normal", label, summary, body || ""].concat(command))
+  }
+
+  function focusWindowCommand(title) {
+    return ["hyprctl", "dispatch", "hl.dsp.focus({ window = \"title:^" + title + "$\" })"]
+  }
+
   // ── Command runner ────────────────────────────────────────────────────
   // run(["mute"], { onLine, onDone, stdin }) — streams each output line to
   // onLine(line, proc) and calls onDone(reply) with Model.parseReply().
@@ -144,9 +169,20 @@ Item {
     return proc
   }
 
+  // Seconds each command may take before we give up on it. `call` waits on
+  // the ring; `login` on the browser; everything else answers at once.
+  function commandTimeout(name, opts) {
+    if (opts && opts.timeoutMs) return opts.timeoutMs
+    if (name === "call") return 120000
+    if (name === "login" || name === "auth") return 90000
+    if (name === "ls" || name === "settings" || name === "on" || name === "off") return 45000
+    return 20000
+  }
+
   function finish(proc) {
     var args = proc.args
     var name = String(args[0])
+    if (proc.timedOut && proc.outLines.length === 0) proc.outLines.push("error: Tuple didn't respond to “" + name + "”")
     var text = proc.outLines.join("\n")
     var reply = Model.parseReply(text)
     setPending(name, false)
@@ -174,6 +210,13 @@ Item {
         interval: 250
         onTriggered: if (proc.answer) proc.answer()
       }
+      // A wedged daemon or socket must not leave a button "busy" forever.
+      property bool timedOut: false
+      property Timer watchdog: Timer {
+        running: proc.running
+        interval: root.commandTimeout(String(proc.args[0]), proc.opts)
+        onTriggered: { proc.timedOut = true; proc.running = false }
+      }
       stdinEnabled: opts.stdin === true
 
       stdout: SplitParser {
@@ -190,13 +233,22 @@ Item {
   }
 
   // ── Daemon lifecycle ──────────────────────────────────────────────────
-  function refresh() {
+  // Opening the panel refreshes everything, but not more than every 15s:
+  // `ls` is the whole org directory, and the device lists spawn v4l2-ctl and
+  // pactl. The periodic timer and explicit actions still refresh as needed.
+  property double lastRefreshAt: 0
+  function refresh(force) {
     probe.running = true
+    readClipboard()
+    var now = Date.now()
+    if (force !== true && now - lastRefreshAt < 15000) return
+    lastRefreshAt = now
     if (daemon) {
       refreshContacts()
       refreshSettings()
     }
-    readClipboard()
+    refreshCameras()
+    refreshMics()
   }
 
   function turnOn() {
@@ -241,6 +293,7 @@ Item {
     s.signaler = "connected"
     s.tokenSaved = scenario !== "login"
     if (scenario === "call") { s.call = "active"; s.peers = ["Alice Smith"]; s.sharing = true; muted = true; personalUrl = "https://tuple.app/c/demo-room" }
+    if (scenario === "viewing") { s.call = "active"; s.peers = ["Alice Smith"]; s.peerWebcam = true; s.peerSharing = "Alice Smith"; s.windows = ["webcam", "screen"]; personalUrl = "https://tuple.app/c/demo-room" }
     if (scenario === "incoming") { s.call = "incoming"; s.incomingFrom = "Alice Smith" }
     log = s
     return scenario
@@ -343,6 +396,16 @@ Item {
   // stdin; answer it with the row that matches the chosen contact.
   function callContact(contact) {
     if (!contact) return
+    // `tuple call` only lists online favourites: star them first.
+    if (!contact.favorite) {
+      run(["favorite", contact.id], { onDone: function(reply) {
+        if (!reply.ok) { say(reply.message, true); return }
+        var starred = Object.assign({}, contact, { favorite: true })
+        root.refreshContacts()
+        root.callContact(starred)
+      } })
+      return
+    }
     var answered = false
     var choices = []
     var proc = run(["call"], {
@@ -427,56 +490,216 @@ Item {
     run(["end"], { onDone: function(reply) { say(reply.ok ? "Call ended" : reply.message, !reply.ok) } })
   }
 
-  // Tuple's own window owns answering; the CLI only exposes "end" to decline.
-  function answer() { run(["ui"], { quiet: true }) }
+  // Tuple's own prompt owns answering; the CLI only exposes "end" to decline.
+  // Bring its incoming-call window forward, or the debug UI if there's none.
+  function answer() {
+    Quickshell.execDetached(["bash", "-c",
+      "hyprctl clients -j | jq -e '.[] | select(.title == \"tuple-incoming-call\")' >/dev/null "
+      + "&& exec hyprctl dispatch 'hl.dsp.focus({ window = \"title:^tuple-incoming-call$\" })'; "
+      + "PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\"; exec " + Util.shellQuote(String(setting("tupleCommand", "tuple"))) + " ui"])
+  }
+
+  // Their shared screen is Tuple's "screen" window (named by tuple-windows).
+  function viewScreen() {
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.focus({ window = \"title:^tuple-screen$\" })"])
+  }
+
+  // How you interact with their screen: draw on it, or drive it.
+  readonly property string guestMode: settingValue("guest-mode") || "annotation"
+  function setGuestMode(mode) {
+    if (mode !== "annotation" && mode !== "control") return
+    setTupleSetting("guest-mode", mode)
+    say(mode === "control" ? "You can control their screen" : "You can draw on their screen", false)
+  }
   function decline() { endCall() }
   function openDebugUi() { run(["ui"], { quiet: true }) }
 
   // ── Camera ────────────────────────────────────────────────────────────
-  // Tuple for Linux can't send webcam video yet (its WebcamCapturerAdapter is
-  // a TODO in v2026_09_16.1). Until it can, show your camera as Omarchy's
-  // floating WebcamOverlay — the same mpv window `omarchy capture
-  // screenrecording --with-webcam` uses, so Omarchy's own window rules pin it
-  // to the corner — and it reaches your peer through the screen share.
+  // Tuple for Linux can't send webcam video yet: its WebcamCapturerAdapter is
+  // a TODO in v2026_09_16.1 and it rejects ShareWebcamRequest. Until it can,
+  // your camera is a local tile (bin/tuple-selfcam) on the call stage next to
+  // theirs, and it reaches them only through your screen share.
   function setCamera(on) {
     if (on === cameraProc.running) return
     if (on) {
-      cameraProc.command = ["bash", "-c", cameraScript, "tuple-camera",
-        String(setting("cameraDevice", "")), String(setting("cameraSize", "medium"))]
-      cameraProc.stopping = false
-      cameraProc.running = true
-      say(sharing ? "Your camera is on your shared screen" : "Camera on — share your screen so they can see it", false)
+      startCamera(camera ? camera.dev : String(setting("cameraDevice", "")))
+      say(sharing ? "They see your camera through your screen share" : "Only you can see this until you share your screen", !sharing)
     } else {
       cameraProc.stopping = true
       cameraProc.running = false
     }
   }
 
+  function startCamera(dev) {
+    cameraProc.command = [helper("tuple-selfcam"), String(dev || "")]
+    cameraProc.stopping = false
+    cameraProc.running = true
+    arrangeWindows()
+  }
+
+  readonly property string stageSize: String(setting("cameraSize", "medium"))
+  onStageSizeChanged: arrangeWindows()
+
+  function helper(name) { return String(Qt.resolvedUrl("bin/" + name)).replace(/^file:\/\//, "") }
+
+  // ── Window placement (bin/tuple-windows) ──────────────────────────────
+  // Names Tuple's X11 windows by role, centres its prompts and lays out the
+  // camera stage. Re-run whenever a Tuple window or your camera comes or goes.
+  function arrangeWindows() {
+    if (demo !== "") return
+    if (windowsProc.running) { windowsProc.again = true; return }
+    windowsProc.command = [helper("tuple-windows"), String(setting("cameraSize", "medium"))]
+    windowsProc.running = true
+  }
+
+  // After a shell restart mid-call the log replay doesn't place anything
+  // (side effects only fire for live lines); tidy up once it has settled.
+  Timer {
+    interval: 5000
+    running: true
+    onTriggered: if (root.log.windows.length > 0 || root.cameraOn) root.arrangeWindows()
+  }
+
+  Process {
+    id: windowsProc
+    property bool again: false
+    onExited: if (again) { again = false; root.arrangeWindows() }
+  }
+
+  // Evidence for "the video was choppy": a CPU/window-size sample every 20s
+  // of a call, in ~/.local/state/omarchy-tuple/perf.log (bin/tuple-perf).
+  Timer {
+    interval: 20000
+    repeat: true
+    running: root.inCall && root.demo === "" && root.setting("perfLog", true) !== false
+    onTriggered: if (!perfProc.running) perfProc.running = true
+  }
+  Process { id: perfProc; command: [root.helper("tuple-perf")] }
+
   function toggleCamera() { setCamera(!cameraProc.running) }
 
-  readonly property string cameraScript:
-    "dev=\"$1\"; size=\"${2:-medium}\"; "
-    + "[ -n \"$dev\" ] || dev=$(omarchy-capture-webcam-list 2>/dev/null | sed -n '1s/[[:space:]].*//p'); "
-    + "[ -n \"$dev\" ] || { echo 'No webcam found' >&2; exit 3; }; "
-    + "opts=framerate=30; fmts=$(v4l2-ctl --list-formats-ext -d \"$dev\" 2>/dev/null); "
-    + "for r in 640x360 1280x720 1920x1080; do case \"$fmts\" in *$r*) opts=\"video_size=$r,$opts\"; break;; esac; done; "
-    + "exec mpv \"av://v4l2:$dev\" --profile=low-latency --untimed --no-cache "
-    + "--demuxer-lavf-o=\"$opts\" '--vf=lavfi=[crop=ih*8/9:ih]' "
-    + "--title=WebcamOverlay --wayland-app-id=\"WebcamOverlay-$size\" "
-    + "--no-border --no-audio --no-osc --osd-level=0 --really-quiet"
+  // Remember the camera by name (/dev/videoN numbers move between boots) and,
+  // if the overlay is up, switch it over straight away.
+  function chooseCamera(cam) {
+    if (!cam) return
+    settingsChangeRequested({ cameraDevice: cam.name })
+    if (cameraProc.running) {
+      cameraProc.switchTo = cam.dev        // reopened in onExited, once mpv lets go
+      cameraProc.stopping = true
+      cameraProc.running = false
+    }
+    say("Camera: " + cam.name, false)
+  }
+
+  function cycleCamera() { chooseCamera(Model.nextCamera(cameras, camera)) }
+
+  // "" = system default.
+  function chooseCameraName(name) {
+    var n = String(name || "")
+    if (n === "") {
+      settingsChangeRequested({ cameraDevice: "" })
+      var first = cameras.length > 0 ? cameras[0] : null
+      if (cameraProc.running && first) { cameraProc.switchTo = first.dev; cameraProc.stopping = true; cameraProc.running = false }
+      say("Camera: system default", false)
+      return
+    }
+    chooseCamera(Model.findCamera(cameras, n))
+  }
+
+  // ── Microphone ────────────────────────────────────────────────────────
+  function refreshMics() { if (!micList.running) micList.running = true }
+
+  Process {
+    id: micList
+    command: ["bash", "-c", "pactl get-default-source 2>/dev/null; echo '---'; pactl -f json list sources 2>/dev/null"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var at = text.indexOf("---")
+        if (at < 0) return
+        root.defaultMic = text.slice(0, at).trim()
+        root.mics = Model.parseMics(text.slice(at + 3))
+      }
+    }
+  }
+
+  // "" = system default.
+  function chooseMic(name) {
+    var n = String(name || "")
+    settingsChangeRequested({ micDevice: n })
+    var m = Model.findMic(mics, n)
+    say(n === "" ? "Microphone: system default" : "Microphone: " + (m ? m.label : n), false)
+  }
+
+  function selectMic(query) {
+    var q = String(query || "").trim()
+    if (q === "" || q === "default") { chooseMic(""); return }
+    var n = parseInt(q, 10)
+    if (/^\d+$/.test(q) && n >= 1 && n <= mics.length) { chooseMic(mics[n - 1].name); return }
+    var lower = q.toLowerCase()
+    for (var i = 0; i < mics.length; i++) {
+      if (mics[i].name === q || mics[i].label.toLowerCase().indexOf(lower) !== -1) { chooseMic(mics[i].name); return }
+    }
+    say("No microphone matches “" + q + "”", true)
+  }
+
+  // While a call is up, keep Tuple's mic stream on the chosen input. With
+  // "system default" it's left alone, unless you switch back mid-call.
+  readonly property string micRouteTarget: micDevice !== "" ? micDevice : (micRoutedThisCall ? "@DEFAULT_SOURCE@" : "")
+  property bool micRoutedThisCall: false
+  readonly property string micRouteKey: (inCall && micRouteTarget !== "") ? (log.pid + "|" + micRouteTarget) : ""
+  onMicRouteKeyChanged: {
+    micRoute.running = false
+    if (micRouteKey === "") return
+    if (micDevice !== "") micRoutedThisCall = true
+    micRoute.command = [String(Qt.resolvedUrl("bin/tuple-mic-route")).replace(/^file:\/\//, ""), String(log.pid), micRouteTarget]
+    Qt.callLater(function() { if (root.micRouteKey !== "") micRoute.running = true })
+  }
+
+  Process { id: micRoute }
+
+  // Pick a camera by name, device path, or 1-based position (IPC).
+  function selectCamera(query) {
+    var q = String(query || "").trim()
+    if (q === "" || q === "default") { chooseCameraName(""); return }
+    var n = parseInt(q, 10)
+    if (/^\d+$/.test(q) && n >= 1 && n <= cameras.length) { chooseCamera(cameras[n - 1]); return }
+    var lower = q.toLowerCase()
+    for (var i = 0; i < cameras.length; i++) {
+      if (cameras[i].dev === q || cameras[i].name.toLowerCase().indexOf(lower) !== -1) { chooseCamera(cameras[i]); return }
+    }
+    say("No camera matches “" + q + "”", true)
+  }
+
+  function refreshCameras() { if (!cameraList.running) cameraList.running = true }
+  Component.onCompleted: { refreshCameras(); refreshMics() }
+
+  Process {
+    id: cameraList
+    command: ["bash", "-c", "omarchy-capture-webcam-list 2>/dev/null"]
+    stdout: StdioCollector {
+      onStreamFinished: root.cameras = Model.parseCameras(text)
+    }
+  }
 
   Process {
     id: cameraProc
     property bool stopping: false
+    property string switchTo: ""
     stderr: SplitParser { onRead: function(line) { if (line.trim() !== "") root.say(line.trim(), true) } }
     onExited: function(code) {
       if (!stopping && code !== 0) root.say(code === 3 ? "No webcam found" : "Camera stopped — is another app using it?", true)
       stopping = false
+      root.arrangeWindows()
+      if (switchTo !== "") { var dev = switchTo; switchTo = ""; Qt.callLater(function() { root.startCamera(dev) }) }
     }
   }
 
   // The overlay only makes sense during a call.
-  onInCallChanged: if (!inCall && cameraProc.running && setting("cameraFollowsCall", true) !== false) setCamera(false)
+  onInCallChanged: {
+    if (!inCall) micRoutedThisCall = false
+    if (!inCall && cameraProc.running && setting("cameraFollowsCall", true) !== false) setCamera(false)
+    if (inCall) { refreshMics(); refreshCameras() }
+  }
 
   // ── Settings ──────────────────────────────────────────────────────────
   function refreshSettings() {
@@ -548,7 +771,12 @@ Item {
     command: ["bash", "-c",
       "d=\"$1/tuple\"; pick() { ls -t \"$d\"/*/log.txt 2>/dev/null | head -1; }; "
       + "f=$(pick); while [ -z \"$f\" ]; do sleep 3; f=$(pick); done; "
-      + "exec tail -n +1 -F \"$f\" 2>/dev/null", "follow", root.dataHome]
+      // While they share, Tuple logs every move of their cursor (~99% of a
+      // call's log). Drop that before it reaches QML. tail --pid ties tail's
+      // life to this process (grep, after exec), so stopping the follower
+      // doesn't leave tail running on a quiet log.
+      + "exec grep --line-buffered -vE '\\|user [0-9]+ mouse |TODO: handle cursor update' "
+      + "< <(exec tail --pid=$$ -n +1 -F \"$f\" 2>/dev/null)", "follow", root.dataHome]
     stdout: SplitParser {
       onRead: function(line) {
         var entry = Model.parseLogLine(line)
@@ -575,7 +803,24 @@ Item {
 
   function onLogEvent(before, next, entry) {
     if (next.call === "ending") endingFallback.restart()
-    if (next.peerWebcam && !before.peerWebcam && isLive(entry) && setting("webcamPip", true) !== false && !pipProc.running) pipProc.running = true
+    if (next.outgoing && !before.outgoing) outgoingFallback.restart()
+    if (next.unanswered !== "" && next.unanswered !== before.unanswered && isLive(entry)) {
+      var who = peerName(next.unanswered)
+      say((who === "Someone" ? "No one" : who) + " didn't answer", true)
+      notify("No answer", (who === "Someone" ? "They" : who) + " didn't pick up. Try New call and send them the link.", "normal")
+    }
+    if (next.windows.join() !== before.windows.join() && isLive(entry)) arrangeWindows()
+    if (next.joinRequest && !before.joinRequest && isLive(entry)) {
+      notifyAction("Someone wants to join", "Let them in from Tuple's prompt.", "critical", "Show", focusWindowCommand("tuple-join-request"))
+    }
+    if (next.joined !== "" && next.joined !== before.joined && isLive(entry) && setting("notifyJoins", true) !== false) {
+      var joinedId = next.joined.split("@")[0]
+      Quickshell.execDetached(["notify-send", "-a", "Tuple", "-i", "tuple", "-t", "4000", "-h", "boolean:transient:true",
+        (joinedId !== "" ? peerName(joinedId) : "Someone") + " joined", "You're pairing now."])
+    }
+    if (next.everyoneLeft && !before.everyoneLeft && isLive(entry)) {
+      notifyAction("Everyone left", "Your call is still open. End it?", "normal", "End call", tupleArgv(["end"]))
+    }
     if (next.tokenSaved && !before.tokenSaved) auth = 1
     if (Model.isSignalerOnline(next.signaler) && !Model.isSignalerOnline(before.signaler)) {
       if (auth !== 1) { auth = 1; refreshContacts() }
@@ -588,17 +833,19 @@ Item {
     }
   }
 
-  Process {
-    id: pipProc
-    command: [String(Qt.resolvedUrl("bin/tuple-pip")).replace(/^file:\/\//, ""), "8"]
-  }
-
   // An `end` issued elsewhere shows up only as `cli: end`; if the daemon goes
   // quiet afterwards there's no later log line to resolve "ending" with.
   Timer {
     id: endingFallback
     interval: 4000
     onTriggered: if (root.log.call === "ending") root.log = Model.resolveEnding(root.log)
+  }
+
+  // `cli: call` with nobody dialled (prompt abandoned) never logs an outcome.
+  Timer {
+    id: outgoingFallback
+    interval: 40000
+    onTriggered: root.log = Model.resolveStaleOutgoing(root.log)
   }
 
   // The daemon truncates its log on every start, which is the only record of
@@ -612,12 +859,7 @@ Item {
 
   Process {
     id: archiver
-    command: ["bash", "-c",
-      "src=$(ls -t \"$1\"/tuple/*/log.txt 2>/dev/null | head -1); [ -n \"$src\" ] || exit 0; "
-      + "dst=\"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tuple/logs\"; mkdir -p \"$dst\"; "
-      + "pid=$(head -c 200 \"$src\" | head -1 | cut -d'|' -f2); [ -n \"$pid\" ] || exit 0; "
-      + "out=\"$dst/$(date -r \"$src\" +%F)-$pid.log\"; cmp -s \"$src\" \"$out\" || cp \"$src\" \"$out\"; "
-      + "ls -t \"$dst\"/*.log | tail -n +21 | xargs -r rm --", "archive", root.dataHome]
+    command: [root.helper("tuple-archive"), root.dataHome]
   }
 
   Timer { id: statusClear; interval: 6000; onTriggered: { root.actionStatus = ""; root.lastError = "" } }

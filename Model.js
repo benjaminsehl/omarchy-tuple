@@ -258,6 +258,12 @@ function emptyState() {
     peerSharing: "",
     peerWebcam: false,
     endingAt: -1,          // log time (s) of `cli: end`; "ending" resolves 3s later
+    outgoing: false,       // `cli: call` is ringing someone; peers are callees until it connects
+    unanswered: "",        // contact id of the last outgoing call that timed out
+    windows: [],           // Tuple windows currently mapped: webcam, screen, join_request, …
+    joinRequest: false,    // someone is asking to join your call
+    everyoneLeft: false,   // a link call outlived its last peer (Tuple's "hang up?" moment)
+    joined: "",            // "<peer>@<time>" of the latest participant-joined event
     lastEvent: "",
     lastEventAt: ""
   }
@@ -269,6 +275,9 @@ function cloneState(s) {
     loggedOut: s.loggedOut, exited: s.exited, call: s.call, incomingFrom: s.incomingFrom,
     peers: s.peers.slice(), sharing: s.sharing, peerSharing: s.peerSharing,
     peerWebcam: s.peerWebcam, endingAt: s.endingAt,
+    outgoing: s.outgoing, unanswered: s.unanswered,
+    windows: s.windows.slice(), joinRequest: s.joinRequest,
+    everyoneLeft: s.everyoneLeft, joined: s.joined,
     lastEvent: s.lastEvent, lastEventAt: s.lastEventAt
   }
 }
@@ -297,7 +306,12 @@ function removeValue(list, value) {
 
 function endCall(s) {
   s.call = "idle"; s.incomingFrom = ""; s.peers = []; s.sharing = false; s.peerSharing = ""
-  s.peerWebcam = false; s.endingAt = -1
+  s.peerWebcam = false; s.endingAt = -1; s.outgoing = false; s.everyoneLeft = false
+}
+
+// An outgoing call has been answered.
+function connectOutgoing(s) {
+  s.call = "active"; s.outgoing = false; s.unanswered = ""
 }
 
 // "HH:MM:SS.mmm" → seconds since midnight.
@@ -339,14 +353,60 @@ function reduceLog(state, entry) {
   var resolved = false
   if (s.call === "ending" && secondsSince(s.endingAt, entry.time) > ENDING_GRACE) { endCall(s); resolved = true }
 
-  if ((m = msg.match(/^EngineEvent: OnPeerAdded \(peer (\S+)/))) {
+  if (/^cli: call\b/.test(msg)) {
+    // `tuple call` rings a favourite. The engine adds them as a peer right
+    // away (before they answer), so stay "connecting" until the call does.
+    if (s.call !== "idle") return resolved ? finishEntry(s, entry) : state
+    s.call = "connecting"; s.outgoing = true; s.unanswered = ""; s.peers = []
+  } else if ((m = msg.match(/^EngineEvent: OnPeerAdded \(peer (\S+)/))) {
+    if (s.outgoing && s.call === "connecting") {
+      if (!resolved && s.peers.indexOf(m[1]) !== -1) return state
+      s.peers = addUnique(s.peers, m[1])
+      return finishEntry(s, entry)
+    }
     // Logged many times per peer; don't churn state for repeats.
     if (!resolved && s.call === "active" && s.peers.indexOf(m[1]) !== -1) return state
     s.call = "active"; s.incomingFrom = ""; s.endingAt = -1; s.peers = addUnique(s.peers, m[1])
-  } else if ((m = msg.match(/^EngineEvent: OnPeerRemoved \(peer (\S+)/))) {
+    s.everyoneLeft = false
+  } else if ((m = msg.match(/^EngineEvent: OnPeerRemoved \(peer (\S+)(.*)$/))) {
+    if (s.outgoing && s.call === "connecting") {
+      // Nobody picked up: the engine gives up after ~25s (reason=timeout).
+      endCall(s); s.peers = []
+      if (/reason=timeout/.test(m[2])) s.unanswered = m[1]
+      return finishEntry(s, entry)
+    }
     if (!resolved && s.peers.indexOf(m[1]) === -1) return state
     s.peers = removeValue(s.peers, m[1])
     if (s.peerSharing === m[1]) s.peerSharing = ""
+  } else if ((m = msg.match(/^(map|unmap) window: (\S+)/))) {
+    // Tuple's own windows. "screen" is *their* shared screen (yours is
+    // OnVideoCapturerDesktop); "join_request" asks you to let someone in.
+    var role = m[2]
+    var mapped = m[1] === "map"
+    if (!resolved && mapped === (s.windows.indexOf(role) !== -1)) return state
+    s.windows = mapped ? addUnique(s.windows, role) : removeValue(s.windows, role)
+    if (role === "screen") s.peerSharing = mapped ? (s.peers.length === 1 ? s.peers[0] : "peer") : ""
+    if (role === "join_request") s.joinRequest = mapped
+  } else if (/^posting join request/.test(msg)) {
+    s.joinRequest = true
+  } else if (/^posting participant joined notification/.test(msg)) {
+    // Tuple's own toast for this is a TODO on Linux; the panel posts one.
+    s.joined = (s.peers.length > 0 ? s.peers[s.peers.length - 1] : "") + "@" + entry.time
+  } else if (/^TODO: implement HangUpEveryoneLeft notification/.test(msg)) {
+    if (s.call !== "active" || s.peers.length > 0) return resolved ? finishEntry(s, entry) : state
+    s.everyoneLeft = true
+  } else if (/^TODO: implement dismiss HangUpEveryoneLeft/.test(msg)) {
+    if (!s.everyoneLeft) return resolved ? finishEntry(s, entry) : state
+    s.everyoneLeft = false
+  } else if (/^invalidating call/.test(msg) || (/^sfu closed/.test(msg) && s.call === "ending")) {
+    // Logged straight after `cli: end` (ours or another client's): the call
+    // is over, no need to wait out the ending grace period.
+    if (s.call === "idle") return resolved ? finishEntry(s, entry) : state
+    endCall(s); s.peers = []
+  } else if (/^sfu closed/.test(msg) && s.outgoing) {
+    endCall(s); s.peers = []
+  } else if ((/^ContextState: READY/.test(msg) || /^peer connection state changed: \S+ -> kConnected/.test(msg)) && s.outgoing) {
+    connectOutgoing(s)
   } else if (/^OnVideoCapturerDesktop Start/.test(msg)) {
     if (!resolved && s.sharing) return state
     s.sharing = true
@@ -389,7 +449,7 @@ function reduceLog(state, entry) {
   } else if (/^peer stopped sharing screen/.test(msg)) {
     s.peerSharing = ""
   } else if (/^(call connected|answering call with)/.test(msg)) {
-    s.call = "active"; s.incomingFrom = ""
+    connectOutgoing(s); s.incomingFrom = ""
   } else if (/^(joining call|call connecting|calling |starting new call|connecting)/i.test(msg)) {
     if (s.call === "idle") s.call = "connecting"
   } else if (/^cli: end\b/.test(msg)) {
@@ -422,6 +482,13 @@ function resolveEnding(state) {
   var s = cloneState(state); endCall(s); return s
 }
 
+// Wall-clock fallback for an outgoing ring the log never resolves (e.g. the
+// `call` prompt was abandoned before anyone was dialled).
+function resolveStaleOutgoing(state) {
+  if (!state || !state.outgoing || state.call !== "connecting" || state.peers.length > 0) return state
+  var s = cloneState(state); endCall(s); return s
+}
+
 function reduceLogText(text, state) {
   var s = state || emptyState()
   var all = lines(text)
@@ -451,7 +518,10 @@ function statusLabel(st) {
   if (!st.daemon) return "Tuple is off"
   if (!st.loggedIn) return "Not logged in"
   if (st.call === "incoming") return st.incomingFrom !== "" ? st.incomingFrom + " is calling" : "Incoming call"
-  if (st.call === "connecting") return "Connecting…"
+  if (st.call === "connecting") {
+    if (st.outgoing && st.peers.length === 1) return "Calling " + st.peers[0] + "…"
+    return st.outgoing ? "Calling…" : "Connecting…"
+  }
   if (st.call === "ending") return "Ending call…"
   if (st.call === "active") {
     if (st.peers.length === 0) return "Waiting for someone to join"
@@ -460,4 +530,85 @@ function statusLabel(st) {
   }
   if (st.signaler !== "" && !isSignalerOnline(st.signaler)) return "Signaler " + st.signaler
   return "Ready to pair"
+}
+
+// ── Cameras ──────────────────────────────────────────────────────────────
+
+// `omarchy-capture-webcam-list` prints one capture device per line:
+//   "/dev/video34  Studio Display: Studio Display  (usb-0000:3f:00.0-1.4):"
+// The name drops v4l2's bus suffix and its "Model: Model" repetition.
+function parseCameras(text) {
+  var out = []
+  var all = nonEmptyLines(text)
+  for (var i = 0; i < all.length; i++) {
+    var m = all[i].match(/^(\/dev\/\S+)\s+(.*)$/)
+    if (!m) continue
+    var name = m[2].replace(/:\s*$/, "").replace(/\s*\([^()]*\)\s*$/, "").trim()
+    var halves = name.match(/^(.+?):\s*(.+)$/)
+    if (halves && halves[1].trim() === halves[2].trim()) name = halves[1].trim()
+    out.push({ dev: m[1], name: name || m[1] })
+  }
+  return out
+}
+
+// The saved preference is a camera name (stable across reboots and replugs,
+// unlike /dev/videoN) or, for older settings, a device path. Falls back to
+// the first camera when the preferred one isn't plugged in.
+function resolveCamera(cameras, preference) {
+  var list = cameras || []
+  var pref = String(preference || "").trim()
+  if (pref !== "") {
+    for (var i = 0; i < list.length; i++) if (list[i].dev === pref) return list[i]
+    var lower = pref.toLowerCase()
+    for (var j = 0; j < list.length; j++) if (list[j].name.toLowerCase() === lower) return list[j]
+  }
+  return list.length > 0 ? list[0] : null
+}
+
+function nextCamera(cameras, current) {
+  var list = cameras || []
+  if (list.length === 0) return null
+  var dev = current ? current.dev : ""
+  for (var i = 0; i < list.length; i++) if (list[i].dev === dev) return list[(i + 1) % list.length]
+  return list[0]
+}
+
+function findCamera(cameras, preference) {
+  var list = cameras || []
+  var pref = String(preference || "").trim()
+  if (pref === "") return null
+  for (var i = 0; i < list.length; i++) if (list[i].dev === pref) return list[i]
+  var lower = pref.toLowerCase()
+  for (var j = 0; j < list.length; j++) if (list[j].name.toLowerCase() === lower) return list[j]
+  return null
+}
+
+// ── Microphones ──────────────────────────────────────────────────────────
+
+// `pactl -f json list sources` → real inputs only (no sink monitors).
+function parseMics(json) {
+  var all
+  try { all = JSON.parse(String(json || "").trim() || "[]") } catch (e) { return [] }
+  var out = []
+  for (var i = 0; i < all.length; i++) {
+    var src = all[i] || {}
+    var props = src.properties || {}
+    var name = String(src.name || "")
+    if (name === "" || /\.monitor$/.test(name) || props["device.class"] === "monitor") continue
+    var label = String(src.description || props["device.description"] || name)
+      .replace(/\s+(Analog Stereo|Mono|Stereo|Multichannel Input)$/i, "")
+    // The laptop's own array reports as the audio chipset ("Core Ultra … HD
+    // Audio Microphones"); call it what it is.
+    if (/^alsa_input\.pci-/.test(name) && /microphone/i.test(label)) label = "Built-in microphone"
+    out.push({ name: name, label: label })
+  }
+  return out
+}
+
+function findMic(mics, name) {
+  var list = mics || []
+  var n = String(name || "")
+  if (n === "") return null
+  for (var i = 0; i < list.length; i++) if (list[i].name === n) return list[i]
+  return null
 }

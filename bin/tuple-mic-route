@@ -1,0 +1,40 @@
+#!/bin/bash
+# tuple-mic-route — keep Tuple's microphone on a chosen input.
+#
+# Tuple for Linux has no input-device setting: its WebRTC audio records from
+# PulseAudio's default source. To use a particular mic for Tuple only (and
+# leave the system default alone), move Tuple's recording streams to it —
+# now, and again whenever Tuple opens a new one (each call does).
+#
+# Usage: tuple-mic-route <daemon-pid> <source-name|@DEFAULT_SOURCE@>
+# Runs until killed. Matches streams by process id, falling back to the
+# binary name, so it only ever touches Tuple's own streams.
+set -uo pipefail
+
+pid="${1:-}"
+target="${2:-@DEFAULT_SOURCE@}"
+
+apply() {
+  pactl -f json list source-outputs 2>/dev/null \
+    | jq -r --arg pid "$pid" '.[] | select(
+        (($pid != "") and (.properties["application.process.id"] == $pid))
+        or (.properties["application.process.binary"] == "tuple")) | .index' \
+    | while read -r idx; do
+        [ -n "$idx" ] && pactl move-source-output "$idx" "$target" 2>/dev/null
+      done
+}
+
+# Read events through a process substitution so we hold pactl's pid and can
+# take it down with us; a plain pipeline would leave it orphaned when the
+# panel stops this script (SIGTERM only reaches the script itself).
+exec 3< <(exec pactl subscribe 2>/dev/null)
+sub=$!
+trap 'kill "$sub" 2>/dev/null' EXIT
+trap 'exit 0' TERM INT HUP
+
+apply
+while read -r line <&3; do
+  case "$line" in
+    *"'new' on source-output"*) apply ;;
+  esac
+done
