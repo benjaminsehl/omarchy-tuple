@@ -1,9 +1,33 @@
 # Tuple for Omarchy
 
-A native Omarchy shell bar widget and panel for the
-[Tuple Linux client](https://tuple.app/linux/) (alpha, v2026_09_16.1), built
-with the same Quickshell UI kit as the built-in Tailscale, Bluetooth, and Audio
-panels, so it follows your theme, fonts, borders, and keyboard conventions.
+A native [Omarchy](https://omarchy.org) bar widget and panel for
+[Tuple's Linux client](https://tuple.app/linux/) (alpha, v2026_09_16.1). Tuple
+for Linux is a command-line tool; this gives it a home in your bar. It's built
+with the same Quickshell UI kit as Omarchy's own Tailscale, Bluetooth and Audio
+panels, so it picks up your theme, fonts, borders and keyboard conventions.
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/idle.png" width="385" alt="Ready to pair: one field to start or join a call, then available teammates"></td>
+    <td><img src="docs/screenshots/call.png" width="385" alt="In a call: mute, share, camera, copy link and end"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Ready to pair.</b> One field starts or joins a call. Teammates are listed available-first, with presence shown once.</sub></td>
+    <td align="center"><sub><b>In a call.</b> The controls show state (Muted, Sharing), and the bar icon turns the active colour.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/incoming.png" width="385" alt="Incoming call with Answer and Decline"></td>
+    <td><img src="docs/screenshots/login.png" width="385" alt="Browser login with an authorization code field"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Incoming call.</b> The bar icon pulses and you get a desktop notification.</sub></td>
+    <td align="center"><sub><b>Log in.</b> Login continues in your browser; paste the code back here.</sub></td>
+  </tr>
+</table>
+
+<sub>Screenshots use the built-in demo data (`omarchy-shell sehl.tuple demo <state>`) on a dark Omarchy theme.</sub>
+
+## What you get
 
 - **Bar icon:** Tuple's mark drawn in theme colours. It is dimmed with a slash
   when Tuple is off, shows a red badge when you're logged out, turns the
@@ -43,9 +67,19 @@ panels, so it follows your theme, fonts, borders, and keyboard conventions.
     `omarchy-capture-webcam-list`), `cameraSize` (`small`/`medium`/`large`),
     and `cameraFollowsCall`.
 
+## Requirements
+
+- Omarchy with the Quickshell-based shell (`omarchy-shell`)
+- The Tuple CLI from [tuple.app/linux](https://tuple.app/linux/) on your
+  `PATH`; `~/.local/bin` and `~/bin` are checked too
+- `socat`, `jq`, `hyprctl`, `wl-copy` and `notify-send`
+- For the camera overlay: `mpv` and `v4l2-ctl`. Omarchy ships these.
+
 ## Install
 
 ```bash
+git clone https://github.com/benjaminsehl/omarchy-tuple.git ~/Code/omarchy-tuple
+cd ~/Code/omarchy-tuple
 ./install.sh            # symlinks into ~/.config/omarchy/plugins/sehl.tuple, adds it to the bar,
                         # and loads hypr/tuple.lua via ~/.local/state/omarchy/toggles/hypr/tuple.lua
 ./uninstall.sh          # undoes all three
@@ -157,9 +191,10 @@ binary's strings. They are the basis of `Model.js`.
 - **Mute state:** mute is never logged. The widget tracks it from its own
   `mute`/`unmute` replies, the `start-calls-muted` setting, and the call
   starting. If you mute from a terminal, the widget won't know.
-- **Untested call paths:** answering, and the exact log lines during real
-  calls, haven't been tested yet. The parser is permissive, and
-  `omarchy-shell sehl.tuple status` shows what it currently believes.
+- **Partly verified:** call state is calibrated against one real call (peers,
+  screen share, their webcam, ending). Answering an incoming call and the
+  runtime webcam PiP haven't been seen live yet. `omarchy-shell sehl.tuple
+  status` shows what the widget currently believes.
 - **Calling restrictions:** you can only call online favourites, because
   that's all `tuple call` offers. Star someone to make them callable.
 
@@ -173,6 +208,21 @@ omarchy plugin validate .
 Files:
 
 - `Model.js`: pure parsing and the state reducer; no QML.
-- `Service.qml`: the daemon probe, log follower, and command runner.
+- `Service.qml`: the daemon probe, log follower, command runner and camera
+  overlay.
 - `Panel.qml`: the bar button and panel UI.
 - `TupleIcon.qml`: the logo.
+- `bin/tuple-request`: talks to the daemon socket directly, for complete
+  replies and without starting the daemon.
+- `bin/tuple-pip`: floats Tuple's X11 webcam window as a picture-in-picture.
+- `hypr/tuple.lua`: Hyprland window rules.
+- `docs/screenshots/`: screenshots for this README, captured with `demo` mode.
+
+The panel follows a few design rules:
+
+- The status line under the title says where you are, so sections don't
+  repeat it.
+- One control per intent.
+- Presence is shown once.
+- Secondary actions appear on the row you point at.
+- Shortcuts live in tooltips, not on the controls.
