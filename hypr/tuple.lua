@@ -6,7 +6,11 @@
 --   tuple-overlay, tuple-error, tuple-external-url, tuple-webcams
 -- (all titled "Tuple").
 
--- Peer webcams: a picture-in-picture that floats above everything, follows you
+-- Peer webcams: a picture-in-picture. This static rule covers the Wayland
+-- app id; when Tuple opens the webcam window over X11 instead (class "Tuple",
+-- indistinguishable from its other X11 windows), bin/tuple-pip applies the
+-- same treatment at runtime when the daemon logs "webcam: added feed".
+-- that floats above everything, follows you
 -- across workspaces, and keeps its shape when resized. Drag with SUPER + left
 -- mouse, resize with SUPER + right mouse — same as Omarchy's PiP windows.
 o.window({ class = "^tuple-webcams$" }, {

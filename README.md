@@ -25,7 +25,10 @@ panels, so it follows your theme, fonts, borders, and keyboard conventions.
 ## Webcams
 
 - **Their webcam:** it shows as a floating picture-in-picture in the
-  bottom-right corner. It stays on every workspace, never steals focus, and
+  bottom-right corner. The static rule covers the `tuple-webcams` Wayland app
+  ID. In practice Tuple opens the webcam window over X11, where it's just
+  class `Tuple`, so `bin/tuple-pip` does the same thing at runtime when the
+  daemon logs `webcam: added feed`. It stays on every workspace, never steals focus, and
   keeps its shape when resized. Drag it with `SUPER` + left mouse and resize it
   with `SUPER` + right mouse. The rule is in `hypr/tuple.lua`, which also
   floats and centres Tuple's small prompts (incoming call, join request,
@@ -110,6 +113,11 @@ binary's strings. They are the basis of `Model.js`.
 - **Auto-start:** any command, even `tuple help`, spawns the daemon if none is
   listening. That's why the widget checks `/proc/net/unix` for
   `@tuple-daemon` and never runs a command while the daemon is off.
+- **Truncated replies:** the daemon writes replies with non-blocking sends and
+  drops the rest on `EAGAIN` (`write to deferred ls pipe failed, error=11`).
+  The stock CLI drains too slowly, so `tuple ls` returns only ~71 of ~7,800
+  people. `bin/tuple-request` speaks the socket protocol through `socat` and
+  gets everything; the widget uses it for `ls` and `settings`.
 - **No status API:** there is no status or JSON command. Live state comes from
   the daemon log at `~/.local/share/tuple/<n>/log.txt`, which is truncated on
   every start and formatted `time|pid|tid|level|[File.cpp:N|]message`. The
@@ -117,9 +125,20 @@ binary's strings. They are the basis of `Model.js`.
   - `signaler state changed: A -> B`
   - `received incoming call: X`
   - `peer joined call: X` and `peer left call: X`
-  - `local user started/stopped sharing screen`
-  - `peer started sharing screen: X`
-  - `call ended` and friends
+  - `call connected`
+  - `EngineEvent: OnPeerAdded/OnPeerRemoved (peer <contact id> …)`, mapped to
+    names from `ls`
+  - `OnVideoCapturerDesktop Start/Stop` (your screen share)
+  - `webcam: added feed` and `WebcamReceivingChange` (their webcam)
+  - `cli: end`, then `call ended`, a remote hang-up, or the call's audio
+    context (`ContextState: TERMINATED`)
+  - **Log replays:** on a shell restart the log is replayed without the
+    commands' replies, so `cli: end` resolves to idle once the log moves 3s
+    past it.
+- **Log archive:** the log is truncated whenever the daemon restarts. The
+  widget keeps a rolling copy of the last 20 runs in
+  `~/.local/state/omarchy-tuple/logs/`, which is what the parser is
+  calibrated against.
 - **Command output:**
   - `tuple ls` prints `  ID Name <email> [available|unavailable|in call|offline]( (favorite))`.
   - `tuple call` prints the online favourites as `  N) Name <email>` and reads

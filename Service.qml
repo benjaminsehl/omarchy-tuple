@@ -35,6 +35,7 @@ Item {
   property string actionStatus: ""
   property string lastError: ""
   property var pending: ({})
+  property bool socatAvailable: false
   // Non-empty while showing canned data (IPC `demo <scenario>`); live probes
   // and commands are suspended so nothing touches the real daemon.
   property string demo: ""
@@ -46,10 +47,12 @@ Item {
   readonly property bool sharing: inCall && log.sharing
   readonly property bool cameraOn: cameraProc.running
   readonly property var peers: daemon ? log.peers : []
+  // The engine reports peers by contact id; show names where we know them.
+  readonly property var peerNames: peers.map(function(p) { return root.peerName(p) })
   readonly property bool busy: Object.keys(pending).length > 0
   readonly property bool startCallsMuted: settingValue("start-calls-muted") === "1"
   readonly property string statusText: !installed ? "Tuple CLI not found" : Model.statusLabel({
-    daemon: daemon, loggedIn: loggedIn, call: call, peers: peers,
+    daemon: daemon, loggedIn: loggedIn, call: call, peers: peerNames,
     incomingFrom: log.incomingFrom, signaler: log.signaler
   })
 
@@ -84,6 +87,17 @@ Item {
   }
 
   function isPending(name) { return pending[name] === true }
+
+  function peerName(id) {
+    var key = String(id)
+    for (var i = 0; i < contacts.length; i++) if (contacts[i].id === key) return contacts[i].name
+    return /^\d+$/.test(key) ? "Someone" : key
+  }
+
+  // Read-only queries go straight to the socket (see bin/tuple-request): the
+  // stock CLI truncates big replies and would spawn the daemon if it's off.
+  readonly property string requestHelper: String(Qt.resolvedUrl("bin/tuple-request")).replace(/^file:\/\//, "")
+  readonly property var directCommands: ["ls", "settings"]
 
   function setPending(name, on) {
     var next = {}
@@ -123,7 +137,9 @@ Item {
     if (opts.exclusive !== false && isPending(name)) return null
     setPending(name, true)
     var proc = commandComponent.createObject(root, { args: args, opts: opts })
-    proc.command = tupleArgv(args)
+    proc.command = directCommands.indexOf(name) !== -1 && socatAvailable
+      ? [requestHelper].concat(args)
+      : tupleArgv(args)
     proc.running = true
     return proc
   }
@@ -498,6 +514,12 @@ Item {
   }
 
   Process {
+    running: true
+    command: ["bash", "-c", "command -v socat >/dev/null"]
+    onExited: function(code) { root.socatAvailable = code === 0 }
+  }
+
+  Process {
     id: probe
     command: ["grep", "-qs", "@tuple-daemon", "/proc/net/unix"]
     onExited: function(code) {
@@ -543,7 +565,17 @@ Item {
 
   Timer { id: followerRestart; interval: 3000; onTriggered: follower.running = true }
 
+  // Log times are UTC; replays on shell start shouldn't trigger side effects.
+  function isLive(entry) {
+    var d = new Date()
+    var now = d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds()
+    var diff = Math.abs(now - Model.logSeconds(entry.time))
+    return Math.min(diff, 86400 - diff) < 30
+  }
+
   function onLogEvent(before, next, entry) {
+    if (next.call === "ending") endingFallback.restart()
+    if (next.peerWebcam && !before.peerWebcam && isLive(entry) && setting("webcamPip", true) !== false && !pipProc.running) pipProc.running = true
     if (next.tokenSaved && !before.tokenSaved) auth = 1
     if (Model.isSignalerOnline(next.signaler) && !Model.isSignalerOnline(before.signaler)) {
       if (auth !== 1) { auth = 1; refreshContacts() }
@@ -554,6 +586,38 @@ Item {
     if (next.call === "incoming" && before.call !== "incoming" && notifyIncoming) {
       notify("Incoming Tuple call", (next.incomingFrom || "Someone") + " wants to pair", "critical")
     }
+  }
+
+  Process {
+    id: pipProc
+    command: [String(Qt.resolvedUrl("bin/tuple-pip")).replace(/^file:\/\//, ""), "8"]
+  }
+
+  // An `end` issued elsewhere shows up only as `cli: end`; if the daemon goes
+  // quiet afterwards there's no later log line to resolve "ending" with.
+  Timer {
+    id: endingFallback
+    interval: 4000
+    onTriggered: if (root.log.call === "ending") root.log = Model.resolveEnding(root.log)
+  }
+
+  // The daemon truncates its log on every start, which is the only record of
+  // what a real call looked like. Keep a rolling copy per daemon run.
+  Timer {
+    interval: 15000
+    running: root.daemon && root.setting("archiveLogs", true) !== false
+    repeat: true
+    onTriggered: if (!archiver.running) archiver.running = true
+  }
+
+  Process {
+    id: archiver
+    command: ["bash", "-c",
+      "src=$(ls -t \"$1\"/tuple/*/log.txt 2>/dev/null | head -1); [ -n \"$src\" ] || exit 0; "
+      + "dst=\"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tuple/logs\"; mkdir -p \"$dst\"; "
+      + "pid=$(head -c 200 \"$src\" | head -1 | cut -d'|' -f2); [ -n \"$pid\" ] || exit 0; "
+      + "out=\"$dst/$(date -r \"$src\" +%F)-$pid.log\"; cmp -s \"$src\" \"$out\" || cp \"$src\" \"$out\"; "
+      + "ls -t \"$dst\"/*.log | tail -n +21 | xargs -r rm --", "archive", root.dataHome]
   }
 
   Timer { id: statusClear; interval: 6000; onTriggered: { root.actionStatus = ""; root.lastError = "" } }

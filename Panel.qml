@@ -227,7 +227,8 @@ Panel {
     function status(): string {
       return JSON.stringify({
         installed: tuple.installed, daemon: tuple.daemon, loggedIn: tuple.loggedIn,
-        call: tuple.call, peers: tuple.peers, muted: tuple.muted, sharing: tuple.sharing,
+        call: tuple.call, peers: tuple.peerNames, peerIds: tuple.peers, muted: tuple.muted, sharing: tuple.sharing,
+        peerWebcam: tuple.log.peerWebcam, camera: tuple.cameraOn, lastEvent: tuple.log.lastEvent,
         incomingFrom: tuple.log.incomingFrom, signaler: tuple.log.signaler,
         version: tuple.log.version, personalUrl: tuple.personalUrl, text: tuple.statusText
       })
@@ -464,8 +465,9 @@ Panel {
               PersonRow {
                 required property var modelData
                 width: parent.width
-                name: String(modelData)
-                caption: tuple.log.peerSharing === String(modelData) ? "Sharing their screen" : ""
+                name: tuple.peerName(modelData)
+                caption: tuple.log.peerSharing === String(modelData) ? "Sharing their screen"
+                  : (tuple.log.peerWebcam ? "Camera on" : "")
               }
             }
 

@@ -253,9 +253,11 @@ function emptyState() {
     exited: false,
     call: "idle",          // idle | connecting | incoming | active | ending
     incomingFrom: "",
-    peers: [],
+    peers: [],             // display names (legacy "peer joined call: X") or contact ids
     sharing: false,
     peerSharing: "",
+    peerWebcam: false,
+    endingAt: -1,          // log time (s) of `cli: end`; "ending" resolves 3s later
     lastEvent: "",
     lastEventAt: ""
   }
@@ -266,6 +268,7 @@ function cloneState(s) {
     pid: s.pid, version: s.version, tokenSaved: s.tokenSaved, signaler: s.signaler,
     loggedOut: s.loggedOut, exited: s.exited, call: s.call, incomingFrom: s.incomingFrom,
     peers: s.peers.slice(), sharing: s.sharing, peerSharing: s.peerSharing,
+    peerWebcam: s.peerWebcam, endingAt: s.endingAt,
     lastEvent: s.lastEvent, lastEventAt: s.lastEventAt
   }
 }
@@ -294,7 +297,27 @@ function removeValue(list, value) {
 
 function endCall(s) {
   s.call = "idle"; s.incomingFrom = ""; s.peers = []; s.sharing = false; s.peerSharing = ""
+  s.peerWebcam = false; s.endingAt = -1
 }
+
+// "HH:MM:SS.mmm" → seconds since midnight.
+function logSeconds(time) {
+  var m = String(time || "").match(/^(\d\d):(\d\d):(\d\d)(?:\.(\d+))?/)
+  if (!m) return -1
+  return parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10) + (m[4] ? parseFloat("0." + m[4]) : 0)
+}
+
+function secondsSince(from, time) {
+  var now = logSeconds(time)
+  if (from < 0 || now < 0) return 0
+  var d = now - from
+  return d < 0 ? d + 86400 : d
+}
+
+// Seconds after `cli: end` with no "call ended" before we call it ended.
+// The daemon's own end is synchronous; this only covers ends issued by
+// other clients and log replays (which never see the command's reply).
+var ENDING_GRACE = 3
 
 function isSignalerOnline(state) {
   return /^(connected|ready|online|authenticated)/i.test(String(state || ""))
@@ -313,7 +336,30 @@ function reduceLog(state, entry) {
   }
   if (s.pid === "") s.pid = entry.pid
 
-  if ((m = msg.match(/^version (v\S+)/))) {
+  var resolved = false
+  if (s.call === "ending" && secondsSince(s.endingAt, entry.time) > ENDING_GRACE) { endCall(s); resolved = true }
+
+  if ((m = msg.match(/^EngineEvent: OnPeerAdded \(peer (\S+)/))) {
+    // Logged many times per peer; don't churn state for repeats.
+    if (!resolved && s.call === "active" && s.peers.indexOf(m[1]) !== -1) return state
+    s.call = "active"; s.incomingFrom = ""; s.endingAt = -1; s.peers = addUnique(s.peers, m[1])
+  } else if ((m = msg.match(/^EngineEvent: OnPeerRemoved \(peer (\S+)/))) {
+    if (!resolved && s.peers.indexOf(m[1]) === -1) return state
+    s.peers = removeValue(s.peers, m[1])
+    if (s.peerSharing === m[1]) s.peerSharing = ""
+  } else if (/^OnVideoCapturerDesktop Start/.test(msg)) {
+    if (!resolved && s.sharing) return state
+    s.sharing = true
+  } else if (/^OnVideoCapturerDesktop Stop/.test(msg)) {
+    if (!resolved && !s.sharing) return state
+    s.sharing = false
+  } else if (/^(webcam: added feed|WebcamReceivingChange: add)/.test(msg)) {
+    if (!resolved && s.peerWebcam) return state
+    s.peerWebcam = true
+  } else if (/^(webcam: removed feed, now 0|WebcamReceivingChange: remove)/.test(msg)) {
+    if (!resolved && !s.peerWebcam) return state
+    s.peerWebcam = false
+  } else if ((m = msg.match(/^version (v\S+)/))) {
     s = emptyState(); s.pid = entry.pid; s.version = m[1]
   } else if ((m = msg.match(/^saved auth token: (\w+)/))) {
     s.tokenSaved = /^(yes|true|1)$/i.test(m[1])
@@ -347,18 +393,33 @@ function reduceLog(state, entry) {
   } else if (/^(joining call|call connecting|calling |starting new call|connecting)/i.test(msg)) {
     if (s.call === "idle") s.call = "connecting"
   } else if (/^cli: end\b/.test(msg)) {
-    if (s.call !== "idle") s.call = "ending"
-  } else if (/^(call ended|call failed|pending call cancelled|pending 'new' call cancelled|cancelled pending join call|call was asked to hang up remotely|call was resolved remotely)/.test(msg)) {
+    if (s.call === "idle" || s.call === "ending") return resolved ? finishEntry(s, entry) : state
+    s.call = "ending"; s.endingAt = logSeconds(entry.time)
+  } else if (/^(call ended|call failed|pending call cancelled|pending 'new' call cancelled|cancelled pending join call|call was asked to hang up remotely|call was resolved remotely|received reversed hang up message|current user is no longer authorized; resetting call state|exiting from 'off' command after call ended)/.test(msg)
+      || /^ContextState: (TERMINATED|FAILED)/.test(msg)) {
+    // ContextState is the per-call PulseAudio context: created as the call
+    // connects, torn down when it ends.
+    if (s.call === "idle" && !resolved) return state
     endCall(s)
   } else if (/^(exiting|disconnect \(GracefulShutdown\)|tuple is no longer running)/.test(msg)) {
     endCall(s); s.exited = true; s.signaler = ""
   } else {
-    return state
+    return resolved ? finishEntry(s, entry) : state
   }
 
-  s.lastEvent = msg
+  return finishEntry(s, entry)
+}
+
+function finishEntry(s, entry) {
+  s.lastEvent = entry.msg
   s.lastEventAt = entry.time
   return s
+}
+
+// Wall-clock fallback for a live "ending" that the log never resolves.
+function resolveEnding(state) {
+  if (!state || state.call !== "ending") return state
+  var s = cloneState(state); endCall(s); return s
 }
 
 function reduceLogText(text, state) {

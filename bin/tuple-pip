@@ -1,0 +1,43 @@
+#!/bin/bash
+# tuple-pip — turn Tuple's peer-webcam window into a floating, pinned PiP.
+#
+# hypr/tuple.lua handles this statically when the window maps as the Wayland
+# app id `tuple-webcams`. In practice Tuple v2026_09_16.1 opens the webcam
+# window over X11 (XWayland), where Hyprland only sees class "Tuple" — the
+# same as Tuple's other X11 windows — so a static rule can't single it out.
+# The panel runs this the moment the daemon logs "webcam: added feed", and it
+# floats whichever tiled Tuple window appears.
+#
+# Usage: tuple-pip [timeout-seconds]   (default 6)
+set -euo pipefail
+
+deadline=$(( SECONDS + ${1:-6} ))
+select='.[] | select((.class == "tuple-webcams" or .initialClass == "tuple-webcams" or (.xwayland and (.class == "Tuple" or .initialClass == "Tuple"))) and (.floating | not))'
+
+dispatch() { hyprctl dispatch "$1" >/dev/null; }
+
+while (( SECONDS < deadline )); do
+  clients=$(hyprctl clients -j)
+  mapfile -t windows < <(jq -r "$select | \"\(.address) \(.monitor)\"" <<<"$clients")
+  if (( ${#windows[@]} > 0 )); then
+    monitors=$(hyprctl monitors -j)
+    for entry in "${windows[@]}"; do
+      read -r address monitor <<<"$entry"
+      # Logical monitor geometry (layout coordinates are post-scale).
+      read -r mx my mw mh < <(jq -r --argjson id "$monitor" \
+        '.[] | select(.id == $id) | "\(.x) \(.y) \((.width / .scale) | floor) \((.height / .scale) | floor)"' <<<"$monitors")
+      w=$(( mh * 32 / 100 )); h=$(( mh * 18 / 100 ))
+      x=$(( mx + mw - w - 40 )); y=$(( my + mh - h - 40 ))
+      sel="address:$address"
+      dispatch "hl.dsp.window.float({ action = \"set\", window = \"$sel\" })"
+      dispatch "hl.dsp.window.pin({ action = \"set\", window = \"$sel\" })"
+      dispatch "hl.dsp.window.resize({ x = $w, y = $h, window = \"$sel\" })"
+      dispatch "hl.dsp.window.move({ x = $x, y = $y, window = \"$sel\" })"
+      dispatch "hl.dsp.window.set_prop({ prop = \"keep_aspect_ratio\", value = \"1\", window = \"$sel\" })"
+      echo "pip $address ${w}x${h}+${x}+${y}"
+    done
+    exit 0
+  fi
+  sleep 0.25
+done
+exit 1

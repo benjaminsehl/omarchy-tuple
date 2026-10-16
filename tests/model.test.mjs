@@ -160,3 +160,60 @@ test("large directories: featured + search stay bounded", () => {
   assert.equal(counts.online, 1)
   assert.equal(all.find((c) => c.name === "Uma Busy").online, false)
 })
+
+// Shapes taken from a real v2026_09_16.1 call log (ids only).
+const REAL_CALL = `19:43:45.664|2520219|2520219|info|Engine.cpp:589|cli: ls
+19:43:46.198|2520219|2520219|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 162751 cursor_mode=0 persist_paint=false)
+19:43:46.198|2520219|2520219|info|call connected
+19:43:46.198|2520219|2520219|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 162751 cursor_mode=0 persist_paint=false)
+19:43:46.540|2520219|2803146|info|ContextState: READY
+19:43:46.583|2520219|2520219|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 162751 cursor_mode=2 persist_paint=true)
+19:44:02.779|2520219|2520219|info|Call.cpp:1962|OnVideoCapturerDesktop Start
+19:44:32.880|2520219|2520219|info|Engine.cpp:776|WebcamReceivingChange: add peer 162751
+19:44:32.880|2520219|2520219|info|webcam: added feed, now 1 feeds
+`
+
+test("real call log: peers by id, share, webcam", () => {
+  const s = M.reduceLogText(LOG.replace(/2464963/g, "2520219") + REAL_CALL)
+  assert.equal(s.call, "active")
+  assert.deepEqual([...s.peers], ["162751"])
+  assert.equal(s.sharing, true)
+  assert.equal(s.peerWebcam, true)
+})
+
+test("repeated OnPeerAdded doesn't churn state", () => {
+  const s = M.reduceLogText(REAL_CALL)
+  const again = M.reduceLog(s, M.parseLogLine("19:45:00.000|2520219|2520219|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 162751 cursor_mode=2 persist_paint=true)"))
+  assert.equal(again, s)
+})
+
+test("`cli: end` with no reply resolves to idle on the next line 3s later (log replay)", () => {
+  let s = M.reduceLogText(REAL_CALL + "02:26:20.600|2520219|2520219|info|Engine.cpp:552|cli: end\n")
+  assert.equal(s.call, "ending")
+  s = M.reduceLogText("02:26:22.000|2520219|2520219|info|Engine.cpp:589|cli: ls\n", s)
+  assert.equal(s.call, "ending")
+  s = M.reduceLogText("02:26:24.722|2520219|2520219|info|Engine.cpp:589|cli: ls\n", s)
+  assert.equal(s.call, "idle")
+  assert.equal(s.sharing, false)
+  assert.equal(s.peerWebcam, false)
+  // A new call after that starts clean.
+  s = M.reduceLogText("02:26:30.517|2520219|2520219|info|call connected\n", s)
+  assert.equal(s.call, "active")
+  assert.deepEqual([...s.peers], [])
+})
+
+test("`cli: end` while idle stays idle; ending wraps past midnight", () => {
+  let s = M.reduceLogText("23:59:59.000|1|1|info|cli: end\n")
+  assert.equal(s.call, "idle")
+  s = M.reduceLogText("23:59:59.000|1|1|info|call connected\n23:59:59.500|1|1|info|cli: end\n00:00:05.000|1|1|info|cli: ls\n")
+  assert.equal(s.call, "idle")
+  assert.equal(M.resolveEnding({ ...M.emptyState(), call: "ending" }).call, "idle")
+})
+
+test("audio context teardown and peer removal", () => {
+  let s = M.reduceLogText(REAL_CALL + "19:50:00.000|2520219|2520219|info|Engine.cpp:749|EngineEvent: OnPeerRemoved (peer 162751 reason=1 'hung up')\n")
+  assert.equal(s.call, "active")
+  assert.deepEqual([...s.peers], [])
+  s = M.reduceLogText("19:50:00.100|2520219|2803146|info|ContextState: TERMINATED\n", s)
+  assert.equal(s.call, "idle")
+})

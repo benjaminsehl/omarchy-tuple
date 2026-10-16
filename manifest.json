@@ -25,7 +25,9 @@
       "tupleCommand": "tuple",
       "cameraDevice": "",
       "cameraSize": "medium",
-      "cameraFollowsCall": true
+      "cameraFollowsCall": true,
+      "webcamPip": true,
+      "archiveLogs": true
     },
     "schema": [
       {
@@ -76,6 +78,18 @@
         "key": "cameraFollowsCall",
         "type": "boolean",
         "label": "Turn the camera off when the call ends",
+        "defaultValue": true
+      },
+      {
+        "key": "webcamPip",
+        "type": "boolean",
+        "label": "Float peer webcams as a picture-in-picture",
+        "defaultValue": true
+      },
+      {
+        "key": "archiveLogs",
+        "type": "boolean",
+        "label": "Keep copies of Tuple daemon logs (~/.local/state/omarchy-tuple/logs)",
         "defaultValue": true
       }
     ]
