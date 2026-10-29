@@ -342,3 +342,19 @@ test("participant joined and everyone-left (Tuple's TODO toasts) are tracked", (
   s = M.reduceLogText("18:14:00.000|1|1|info|Engine.cpp:749|EngineEvent: OnPeerAdded (peer 71792 cursor_mode=0 persist_paint=false)\n", s)
   assert.equal(s.everyoneLeft, false)
 })
+
+test("incoming call: id isn't a caller, prompt holds until answered", () => {
+  const at = (t, msg) => `${t}|3473468|3473473|info|Caller.cpp:1|${msg}\n`
+  let s = M.reduceLogText(
+    at("19:32:14.633", "received incoming call: 6d82aea1-31a4-42f4-bf49-abcc0fcbc2d4")
+    + at("19:32:14.667", "map window: incoming_call")
+    + at("19:32:14.667", "EngineEvent: OnPeerAdded (peer 115309 cursor_mode=0 persist_paint=false)"))
+  assert.equal(s.call, "incoming")
+  assert.equal(s.incomingFrom, "")
+  assert.deepEqual([...s.peers], ["115309"])
+  const accepted = M.reduceLogText(at("19:32:18.011", "resolving incoming call: accept"), s)
+  assert.equal(accepted.call, "active")
+  assert.deepEqual([...accepted.peers], ["115309"])
+  const rejected = M.reduceLogText(at("19:32:18.011", "resolving incoming call: reject"), s)
+  assert.equal(rejected.call, "idle")
+})

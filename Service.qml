@@ -828,8 +828,18 @@ Item {
     if (next.exited && !before.exited) probe.running = true
     if (before.call === "idle" && next.call !== "idle" && next.call !== "incoming") muted = startCallsMuted
     if (next.call === "idle" && before.call !== "idle") muted = false
-    if (next.call === "incoming" && before.call !== "incoming" && notifyIncoming) {
-      notify("Incoming Tuple call", (next.incomingFrom || "Someone") + " wants to pair", "critical")
+    if (next.call === "incoming" && before.call !== "incoming" && notifyIncoming && isLive(entry)) incomingNotice.restart()
+  }
+
+  // The caller is only logged as a peer just after the call itself; wait for
+  // them so the notification can say who it is.
+  Timer {
+    id: incomingNotice
+    interval: 500
+    onTriggered: {
+      if (root.log.call !== "incoming") return
+      var who = root.log.incomingFrom || (root.log.peers.length > 0 ? peerName(root.log.peers[0]) : "Someone")
+      notifyAction("Incoming Tuple call", who + " wants to pair", "critical", "Show", focusWindowCommand("tuple-incoming-call"))
     }
   }
 
