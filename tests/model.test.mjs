@@ -76,7 +76,8 @@ test("contacts + call choices (format from binary strings)", () => {
   assert.equal(M.initials("Alice Smith"), "AS")
   assert.equal(M.presenceLabel("available"), "")
   assert.equal(M.presenceLabel("in call"), "In a call")
-  assert.equal(M.presenceLabel("offline"), "Offline")
+  assert.equal(M.presenceLabel("offline"), "")
+  assert.equal(M.presenceLabel("unavailable"), "")
 })
 
 test("reduceLog: real startup log", () => {

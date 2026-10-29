@@ -121,10 +121,11 @@ function parseContacts(text) {
   return out
 }
 
-// Words only when they add information beyond the presence dot.
+// Words only when they add information beyond the row's fade (unavailable
+// people are faded out, so "Offline"/"Unavailable" would just restate it).
 function presenceLabel(status) {
   var s = String(status || "").trim().toLowerCase()
-  if (s === "" || s === "available" || s === "online") return ""
+  if (s === "" || s === "available" || s === "online" || !isOnlineStatus(s)) return ""
   if (s === "in call") return "In a call"
   return s.charAt(0).toUpperCase() + s.slice(1)
 }

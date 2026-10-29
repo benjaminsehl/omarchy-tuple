@@ -10,7 +10,8 @@ import "Model.js" as Model
 // Design notes — "as little design as possible":
 //   * The hero states where you are; sections don't restate it.
 //   * One control per intent: a single field+button starts or joins a call.
-//   * Presence is shown once (the dot); words only when they add something.
+//   * Presence is shown once: unavailable people are faded; words only when
+//     they add something (e.g. "In a call").
 //   * Secondary actions (favorite, call) appear on the row you're pointing at.
 //   * Keyboard shortcuts exist but aren't printed; see README / tooltips.
 Panel {
@@ -50,13 +51,22 @@ Panel {
   // Never bind a Repeater to the full directory (orgs have thousands of
   // people); show available + favorites, or the top search matches.
   readonly property var shownContacts: Model.searchContacts(tuple.contacts, contactQuery, contactLimit)
-  readonly property var footerKeys: ["settings", "debug", "logout"]
+  readonly property bool peopleHints: tuple.loggedIn && (shownContacts.length === 0
+    || (contactQuery !== "" && shownContacts.length >= contactLimit))
+  // With nothing below it, the people list runs through the panel's bottom
+  // padding to the edge and scrolls under it.
+  readonly property bool peopleBleed: tuple.loggedIn && shownContacts.length > 0 && !peopleHints
+  readonly property var headerKeys: ["daemon", "settings"]
   readonly property var tileKeys: ["answer", "decline", "mute", "share", "camera", "copyLink", "end"]
 
   readonly property var navKeys: {
     var keys = []
     if (tuple.installed) keys.push("daemon")
     if (!tuple.installed || !tuple.daemon) return keys
+    if (tuple.loggedIn) {
+      keys.push("settings")
+      if (settingsOpen) for (var j = 0; j < tuple.tupleSettings.length; j++) keys.push("setting:" + tuple.tupleSettings[j].name)
+    }
     if (!tuple.loggedIn) {
       keys.push("login")
       if (tuple.loginUrl !== "") keys.push("loginUrl")
@@ -73,8 +83,6 @@ Panel {
     if (showPair) keys.push("pair")
     if (searchField.visible) keys.push("search")
     for (var i = 0; i < shownContacts.length; i++) keys.push("contact:" + shownContacts[i].id)
-    if (settingsOpen) for (var j = 0; j < tuple.tupleSettings.length; j++) keys.push("setting:" + tuple.tupleSettings[j].name)
-    keys.push("settings"); keys.push("debug"); keys.push("logout")
     return keys
   }
 
@@ -82,13 +90,13 @@ Panel {
   function hover(key) { cursorActive = true; cursorKey = key }
 
   function moveCursor(dx, dy) {
-    var horizontal = footerKeys.indexOf(cursorKey) !== -1 || tileKeys.indexOf(cursorKey) !== -1
+    var horizontal = headerKeys.indexOf(cursorKey) !== -1 || tileKeys.indexOf(cursorKey) !== -1
     if (dx !== 0 && horizontal) dy = dx
     if (dy === 0) return
     var i = navKeys.indexOf(cursorKey)
     // Vertical moves skip across a horizontal group in one step.
     if (dx === 0 && horizontal) {
-      var group = footerKeys.indexOf(cursorKey) !== -1 ? footerKeys : tileKeys
+      var group = headerKeys.indexOf(cursorKey) !== -1 ? headerKeys : tileKeys
       while (i + dy >= 0 && i + dy < navKeys.length && group.indexOf(navKeys[i + dy]) !== -1) i += dy
     }
     i = i === -1 ? 0 : Math.max(0, Math.min(navKeys.length - 1, i + dy))
@@ -129,8 +137,6 @@ Panel {
     else if (key === "pair") pair()
     else if (key === "search") focusField(searchField)
     else if (key === "settings") settingsOpen = !settingsOpen
-    else if (key === "debug") tuple.openDebugUi()
-    else if (key === "logout") tuple.logout()
     else if (key.indexOf("contact:") === 0) callFromKeyboard(contactById(key.slice(8)))
     else if (key.indexOf("setting:") === 0) cycleSetting(settingByName(key.slice(8)))
   }
@@ -350,7 +356,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight - (root.peopleBleed ? panel.padding : 0), Style.space(600))
 
     CardShadow { material: depthTheme }
 
@@ -383,13 +389,14 @@ Panel {
         else if (k === "r") tuple.refresh(true)
       }
 
-      // Only the people list scrolls. Everything above it (status, call
-      // controls, the join field, search) and below it (settings, footer)
-      // stays put; the list takes whatever height is left and shrinks first
-      // when the panel is capped by the screen.
+      // Only the people list scrolls. Everything above it (status, settings,
+      // call controls, the join field, search) and below it (hints) stays
+      // put; the list takes whatever height is left and shrinks first when
+      // the panel is capped by the screen.
       ColumnLayout {
         id: column
         anchors.fill: parent
+        anchors.bottomMargin: root.peopleBleed ? -panel.padding : 0
         spacing: 0
 
         Column {
@@ -427,20 +434,37 @@ Panel {
                 }
               }
               trailingControl: Component {
-                ToggleSwitch {
-                  id: powerSwitch
-                  visible: tuple.installed
-                  checked: tuple.daemon
-                  busy: tuple.isPending("on") || tuple.isPending("off")
-                  hasCursor: header.ringVisible
-                  foreground: hero.foreground
-                  onHovered: function(on) { if (on) root.hover("daemon") }
-                  onToggled: tuple.toggleDaemon()
+                Row {
+                  spacing: Style.space(8)
 
-                  PanelToolTip {
-                    visible: powerSwitch.containsMouse
-                    text: tuple.daemon ? "Turn off — you won't receive calls" : "Turn on to pair and receive calls"
+                  ToggleSwitch {
+                    id: powerSwitch
+                    visible: tuple.installed
+                    anchors.verticalCenter: parent.verticalCenter
+                    checked: tuple.daemon
+                    busy: tuple.isPending("on") || tuple.isPending("off")
+                    hasCursor: header.ringVisible
+                    foreground: hero.foreground
+                    onHovered: function(on) { if (on) root.hover("daemon") }
+                    onToggled: tuple.toggleDaemon()
+
+                    PanelToolTip {
+                      visible: powerSwitch.containsMouse
+                      text: tuple.daemon ? "Turn off — you won't receive calls" : "Turn on to pair and receive calls"
+                      fontFamily: hero.fontFamily
+                    }
+                  }
+
+                  PanelActionButton {
+                    visible: tuple.daemon && tuple.loggedIn
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "󰒓"
+                    tooltipText: root.settingsOpen ? "Hide settings" : "Settings"
+                    hasCursor: root.hasCursor("settings") || root.settingsOpen
+                    foreground: hero.foreground
                     fontFamily: hero.fontFamily
+                    onHovered: function(on) { if (on) root.hover("settings") }
+                    onClicked: root.settingsOpen = !root.settingsOpen
                   }
                 }
               }
@@ -456,6 +480,24 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+          }
+
+          // ── Settings (the gear in the hero) ─────────────────────────────
+          Column {
+            visible: tuple.loggedIn && root.settingsOpen && tuple.tupleSettings.length > 0
+            width: parent.width
+            spacing: Style.space(4)
+
+            Repeater {
+              model: root.settingsOpen ? tuple.tupleSettings : []
+              SettingRow {
+                required property var modelData
+                width: parent.width
+                setting: modelData
+              }
+            }
+
+            PanelSeparator { foreground: root.foreground }
           }
 
           Hint {
@@ -783,6 +825,8 @@ Panel {
             id: peopleColumn
             width: peopleFlick.width
             spacing: Style.space(6)
+            // Scrolled to the end, the last row clears the panel edge.
+            bottomPadding: root.peopleBleed ? panel.padding : 0
 
             Repeater {
               model: root.shownContacts
@@ -799,6 +843,7 @@ Panel {
 
         Column {
           id: bottomColumn
+          visible: !root.peopleBleed
           Layout.fillWidth: true
           Layout.topMargin: Style.space(peopleFlick.visible ? 12 : 8)
           Layout.preferredHeight: implicitHeight
@@ -809,8 +854,7 @@ Panel {
           bottomPadding: depthTheme.on ? Style.space(3) : 0
 
           Column {
-            visible: tuple.loggedIn && (root.shownContacts.length === 0
-              || (root.contactQuery !== "" && root.shownContacts.length >= root.contactLimit))
+            visible: root.peopleHints
             width: parent.width
             spacing: Style.space(6)
 
@@ -833,42 +877,6 @@ Panel {
             }
           }
 
-          // ── Settings (expanded from the footer) ───────────────────────
-          Column {
-            visible: tuple.loggedIn && root.settingsOpen && tuple.tupleSettings.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSeparator { foreground: root.foreground }
-
-            Repeater {
-              model: root.settingsOpen ? tuple.tupleSettings : []
-              SettingRow {
-                required property var modelData
-                width: parent.width
-                setting: modelData
-              }
-            }
-          }
-
-          // ── Footer: quiet, secondary ──────────────────────────────────
-          Column {
-            visible: tuple.loggedIn
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSeparator { foreground: root.foreground }
-
-            RowLayout {
-              width: parent.width
-              spacing: Style.space(4)
-
-              FooterButton { navKey: "settings"; text: root.settingsOpen ? "Hide settings" : "Settings"; onClicked: root.settingsOpen = !root.settingsOpen }
-              Item { Layout.fillWidth: true }
-              FooterButton { navKey: "debug"; text: "Tuple window"; onClicked: tuple.openDebugUi() }
-              FooterButton { navKey: "logout"; text: "Log out"; onClicked: tuple.logout() }
-            }
-          }
         }
       }
     }
@@ -987,15 +995,6 @@ Panel {
       focused: wf.activeFocus
       hot: wf.hovered || wf.hasCursor
     }
-  }
-
-  component FooterButton: Button {
-    property string navKey: ""
-    hasCursor: root.hasCursor(navKey)
-    foreground: hasCursor ? root.foreground : root.dim
-    fontFamily: root.fontFamily
-    fontSize: Style.font.bodySmall
-    onHovered: function(on) { if (on) root.hover(navKey) }
   }
 
   component ActionRow: CursorSurface {
@@ -1220,33 +1219,18 @@ Panel {
   component Avatar: Rectangle {
     id: avatar
     property string name: ""
-    property bool online: false
     width: Style.space(24)
     height: width
     radius: Style.cornerRadius > 0 ? width / 2 : 0
-    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, online ? 0.14 : 0.06)
+    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.14)
 
     Text {
       anchors.centerIn: parent
       text: Model.initials(avatar.name)
-      color: avatar.online ? root.foreground : root.dim
+      color: root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
       font.bold: true
-    }
-
-    // Presence, shown once and only when it's good news.
-    Rectangle {
-      visible: avatar.online
-      width: Style.space(7)
-      height: width
-      radius: width / 2
-      anchors.right: parent.right
-      anchors.bottom: parent.bottom
-      anchors.margins: -Style.space(2)
-      color: Color.accent
-      border.width: Math.max(1, Style.space(2))
-      border.color: Color.popups.background
     }
   }
 
@@ -1262,7 +1246,7 @@ Panel {
       anchors.rightMargin: Style.space(6)
       spacing: Style.space(10)
 
-      Avatar { name: personRow.name; online: true; Layout.alignment: Qt.AlignVCenter }
+      Avatar { name: personRow.name; Layout.alignment: Qt.AlignVCenter }
 
       Text {
         Layout.fillWidth: true
@@ -1315,9 +1299,10 @@ Panel {
       anchors.rightMargin: Style.space(4)
       spacing: Style.space(10)
 
+      // Unavailable people are faded rather than labelled.
       Avatar {
         name: contactRow.contact ? contactRow.contact.name : ""
-        online: contactRow.contact ? contactRow.contact.online : false
+        opacity: contactRow.contact && contactRow.contact.online ? 1 : 0.45
         Layout.alignment: Qt.AlignVCenter
       }
 
@@ -1325,7 +1310,8 @@ Panel {
         textFormat: Text.PlainText
         Layout.fillWidth: true
         text: contactRow.contact ? contactRow.contact.name : ""
-        color: contactRow.contact && contactRow.contact.online ? root.foreground : root.dim
+        color: root.foreground
+        opacity: contactRow.contact && contactRow.contact.online ? 1 : 0.45
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         elide: Text.ElideRight

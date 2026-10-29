@@ -161,9 +161,9 @@ cd ~/Code/omarchy-tuple
 
 Pass a placement to `install.sh`, e.g. `./install.sh --section right --before omarchy.agents`.
 
-The shell's plugin watcher doesn't follow symlinks. After editing, run
-`./install.sh` again: re-creating the link triggers a reload. If the IPC
-functions seem stale, the old handler kept the target; run `omarchy restart shell`.
+The shell's plugin watcher doesn't follow symlinks, and re-creating the link
+(`./install.sh`) logs a reload but keeps serving the old, cached QML. After
+editing, run `omarchy restart shell`.
 
 ## Use
 

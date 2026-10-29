@@ -37,5 +37,6 @@ fi
 
 omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
 sleep 1
-omarchy plugin enable "$id" "${@:---section right}"
+(( $# > 0 )) || set -- --section right
+omarchy plugin enable "$id" "$@"
 echo "enabled $id"
