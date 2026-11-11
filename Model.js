@@ -2,21 +2,18 @@
 
 // Pure parsing + state helpers for the Tuple Linux client.
 //
-// How the Tuple Linux client works (v2026_09_16.1):
+// How the Tuple Linux client works (v2026_11_02.0):
 //
-//   * `tuple` is a single static binary. Every invocation is a thin client:
-//     it connects to the abstract unix socket `@tuple-daemon`, sends its argv
-//     framed as `u64 byteLength, u64 argc, "arg\0arg\0..."`, forwards stdin,
-//     prints whatever text the daemon streams back, and exits on EOF.
+//   * `tuple` is a single static binary. The daemon listens on
+//     $XDG_RUNTIME_DIR/tuple-0 (older versions: abstract `@tuple-daemon`).
 //   * If no daemon is listening, any invocation spawns one first. The UI must
 //     therefore never run a command "just to look" while the daemon is off.
 //   * The daemon writes a log to ~/.local/share/tuple/<n>/log.txt, truncated on
 //     every daemon start, formatted `HH:MM:SS.mmm|pid|tid|level|message`.
-//     That log is the only live event feed (signaler, peers, screen share,
-//     incoming calls), so Service.qml tails it and feeds it through
-//     reduceLog() below.
-//   * There is no status/JSON command. Mic state is never logged, so mute is
-//     tracked from command replies.
+//     Service.qml tails it for live events (signaler, peers, screen share,
+//     incoming calls) and feeds it through reduceLog() below.
+//   * Contacts and rooms come from `--format json`. Mic state is never logged,
+//     so mute is tracked from command replies.
 //
 // Keep this file free of QML/Quickshell APIs so it can be unit tested with
 // plain node (see tests/model.test.mjs).
@@ -66,10 +63,15 @@ function firstUrl(text) {
   return m ? m[0] : ""
 }
 
-// `tuple new` prints "personal url: https://tuple.app/c/<slug>".
-function parsePersonalUrl(text) {
-  var m = String(text || "").match(/personal url:\s*(\S+)/i)
-  return m ? m[1] : ""
+// `tuple rooms list --format json`: the personal room's URL starts a new call.
+function parsePersonalUrl(json) {
+  var rooms = parseJson(json, [])
+  for (var i = 0; i < rooms.length; i++) if (rooms[i] && rooms[i].kind === "personal") return String(rooms[i].http_value || "")
+  return ""
+}
+
+function parseJson(text, fallback) {
+  try { var v = JSON.parse(String(text || "")); return v === null || v === undefined ? fallback : v } catch (e) { return fallback }
 }
 
 // `tuple login` prints a https://production.tuple.app/start?... URL.
@@ -95,21 +97,21 @@ function extractCallUrl(value) {
 
 // ── Contacts ─────────────────────────────────────────────────────────────
 
-// `tuple ls` rows: "  {id} {name} <{email}> [{status}]{ (favorite)}"
-function parseContacts(text) {
+// `tuple contacts list --format json`: [{ id, email, full_name, status, favorited, … }]
+function parseContacts(json) {
   var out = []
-  var all = lines(text)
-  for (var i = 0; i < all.length; i++) {
-    var m = all[i].match(/^\s*(\S+)\s+(.*?)\s*<([^>]*)>\s*\[([^\]]*)\](.*)$/)
-    if (!m) continue
-    var status = m[4].trim()
+  var rows = parseJson(json, [])
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i]
+    if (!r || r.id === undefined) continue
+    var status = String(r.status || "").trim()
     out.push({
-      id: m[1],
-      name: m[2].trim() || m[3],
-      email: m[3].trim(),
+      id: String(r.id),
+      name: String(r.full_name || r.short_name || r.email || ""),
+      email: String(r.email || ""),
       status: status,
       online: isOnlineStatus(status),
-      favorite: /favorite/i.test(m[5])
+      favorite: r.favorited === true
     })
   }
   // Reachable people first, then favorites, then alphabetical.
@@ -126,14 +128,14 @@ function parseContacts(text) {
 function presenceLabel(status) {
   var s = String(status || "").trim().toLowerCase()
   if (s === "" || s === "available" || s === "online" || !isOnlineStatus(s)) return ""
-  if (s === "in call") return "In a call"
+  if (s === "in call" || s === "busy") return "In a call"
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
 function isOnlineStatus(status) {
   var s = String(status || "").trim().toLowerCase()
   if (s === "") return false
-  return !/^(off|offline|unavailable|away|inactive|disconnected)\b/.test(s)
+  return !/^(off|offline|unknown|unavailable|away|inactive|disconnected)\b/.test(s)
 }
 
 // Org directories are big (thousands of rows), so the panel never renders the
@@ -175,26 +177,6 @@ function contactCounts(contacts) {
     if (c.favorite && c.online) onlineFavorites++
   }
   return { total: contacts.length, favorites: favorites, online: online, onlineFavorites: onlineFavorites }
-}
-
-// `tuple call` prompt rows: "  {n}) {name} <{email}>" (online favorites only).
-function parseCallChoices(text) {
-  var out = []
-  var all = lines(text)
-  for (var i = 0; i < all.length; i++) {
-    var m = all[i].match(/^\s*(\d+)\)\s+(.*?)\s*<([^>]*)>\s*$/)
-    if (m) out.push({ index: parseInt(m[1], 10), name: m[2].trim(), email: m[3].trim() })
-  }
-  return out
-}
-
-function choiceForContact(choices, contact) {
-  if (!contact) return null
-  var email = String(contact.email || "").toLowerCase()
-  var name = String(contact.name || "").toLowerCase()
-  for (var i = 0; i < choices.length; i++) if (email !== "" && choices[i].email.toLowerCase() === email) return choices[i]
-  for (var j = 0; j < choices.length; j++) if (name !== "" && choices[j].name.toLowerCase() === name) return choices[j]
-  return null
 }
 
 function initials(name) {
@@ -503,6 +485,31 @@ function resolveStaleOutgoing(state) {
   var s = cloneState(state); endCall(s); return s
 }
 
+// One line of `tuple state follow --format json`: { in_call, call: { muted, … } }.
+// The log has no line for every end (e.g. a leave from another client), so a
+// summary with in_call false ends any call that isn't ringing.
+function applySummary(state, summary) {
+  if (!summary || summary.in_call !== false) return state
+  if (state.call === "idle" || state.call === "incoming" || (state.outgoing && state.call === "connecting")) return state
+  var s = cloneState(state); endCall(s); return s
+}
+
+// `call start` rings someone; the log no longer records it.
+function startOutgoing(state) {
+  var s = cloneState(state || emptyState())
+  if (s.call !== "idle") return state
+  s.call = "connecting"; s.outgoing = true; s.unanswered = ""; s.peers = []
+  return s
+}
+
+// `call start` exited: 0 means they answered, anything else means no call.
+function finishOutgoing(state, answered) {
+  if (!state.outgoing) return state
+  var s = cloneState(state)
+  if (answered) connectOutgoing(s); else endCall(s)
+  return s
+}
+
 function reduceLogText(text, state) {
   var s = state || emptyState()
   var all = lines(text)
@@ -515,14 +522,14 @@ function reduceLogText(text, state) {
 function reduceReply(state, command, reply) {
   var s = cloneState(state || emptyState())
   var text = reply.lines.join("\n")
-  if (/not in a call|already not in a call/i.test(text)) endCall(s)
+  if (/not in a call|no longer available \(HTTP 410\)/i.test(text)) endCall(s)
   if (!reply.ok) return s
   if (command === "share") s.sharing = true
   else if (command === "unshare") s.sharing = false
-  else if (command === "end") endCall(s)
+  else if (command === "call leave") endCall(s)
   else if (command === "logout") { s.tokenSaved = false; s.loggedOut = true; endCall(s) }
   else if (command === "auth") { s.tokenSaved = true; s.loggedOut = false }
-  else if (command === "off") { endCall(s); s.exited = true; s.signaler = "" }
+  else if (command === "stop") { endCall(s); s.exited = true; s.signaler = "" }
   if (/call connected/i.test(text)) s.call = "active"
   if (/call ended/i.test(text)) endCall(s)
   return s

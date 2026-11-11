@@ -7,7 +7,7 @@ import "Model.js" as Model
 // State + actions for the Tuple Linux client.
 //
 // Sources of truth (see Model.js header for the protocol notes):
-//   1. /proc/net/unix          → is the daemon listening on @tuple-daemon?
+//   1. /proc/net/unix          → is the daemon listening on its socket?
 //   2. tail -F <data>/log.txt  → signaler, peers, screen share, incoming calls
 //   3. command replies         → everything we do ourselves (mute, share, …)
 Item {
@@ -29,13 +29,13 @@ Item {
   property bool contactsLoaded: false
   property var tupleSettings: []
   property string personalUrl: ""
+  property bool startingCall: false        // "New call" is joining your personal room
   property string loginUrl: ""
   property bool loginPending: false
   property string clipboardCallUrl: ""
   property string actionStatus: ""
   property string lastError: ""
   property var pending: ({})
-  property bool socatAvailable: false
   // Non-empty while showing canned data (IPC `demo <scenario>`); live probes
   // and commands are suspended so nothing touches the real daemon.
   property string demo: ""
@@ -107,10 +107,11 @@ Item {
     return /^\d+$/.test(key) ? "Someone" : key
   }
 
-  // Read-only queries go straight to the socket (see bin/tuple-request): the
-  // stock CLI truncates big replies and would spawn the daemon if it's off.
-  readonly property string requestHelper: String(Qt.resolvedUrl("bin/tuple-request")).replace(/^file:\/\//, "")
-  readonly property var directCommands: ["ls", "settings"]
+  // "call mute", "contacts list", "start": grouped commands are named by both words.
+  function commandName(args) {
+    var group = ["call", "contacts", "rooms"]
+    return group.indexOf(String(args[0])) !== -1 ? args[0] + " " + args[1] : String(args[0])
+  }
 
   function setPending(name, on) {
     var next = {}
@@ -157,36 +158,34 @@ Item {
   // onLine(line, proc) and calls onDone(reply) with Model.parseReply().
   function run(args, opts) {
     opts = opts || {}
-    var name = String(args[0])
+    var name = commandName(args)
     if (demo !== "") { if (opts.quiet !== true) say("demo: tuple " + args.join(" "), false); return null }
     if (opts.exclusive !== false && isPending(name)) return null
     setPending(name, true)
     var proc = commandComponent.createObject(root, { args: args, opts: opts })
-    proc.command = directCommands.indexOf(name) !== -1 && socatAvailable
-      ? [requestHelper].concat(args)
-      : tupleArgv(args)
+    proc.command = tupleArgv(args)
     proc.running = true
     return proc
   }
 
-  // Seconds each command may take before we give up on it. `call` waits on
-  // the ring; `login` on the browser; everything else answers at once.
+  // Seconds each command may take before we give up on it. `call start` waits
+  // on the ring; `login` on the browser; everything else answers at once.
   function commandTimeout(name, opts) {
     if (opts && opts.timeoutMs) return opts.timeoutMs
-    if (name === "call") return 120000
+    if (name === "call start") return 120000
     if (name === "login" || name === "auth") return 90000
-    if (name === "ls" || name === "settings" || name === "on" || name === "off") return 45000
+    if (name === "contacts list" || name === "settings" || name === "start" || name === "stop") return 45000
     return 20000
   }
 
-  function finish(proc) {
-    var args = proc.args
-    var name = String(args[0])
+  function finish(proc, code) {
+    var name = commandName(proc.args)
     if (proc.timedOut && proc.outLines.length === 0) proc.outLines.push("error: Tuple didn't respond to “" + name + "”")
     var text = proc.outLines.join("\n")
     var reply = Model.parseReply(text)
+    if (code !== 0) reply.ok = false
     setPending(name, false)
-    if (name !== "ls" && name !== "settings") log = Model.reduceReply(log, name, reply)
+    if (name !== "contacts list" && name !== "rooms list" && name !== "settings") log = Model.reduceReply(log, name, reply)
     if (reply.lines.length < 5 && /not logged in/i.test(text)) auth = 0
     if (proc.opts.onDone) proc.opts.onDone(reply, proc)
     else if (proc.opts.quiet !== true && reply.message !== "") say(reply.message, !reply.ok)
@@ -201,20 +200,14 @@ Item {
       id: proc
       property var args: []
       property var opts: ({})
-      // Lines are collected in an array: `tuple ls` on an org directory is
-      // ~8k lines, and string += per line is quadratic.
+      // Collected in an array: string += per line is quadratic on long replies.
       property var outLines: []
-      // Interactive `tuple call`: answer once the numbered list stops growing.
-      property var answer: null
-      property Timer answerTimer: Timer {
-        interval: 250
-        onTriggered: if (proc.answer) proc.answer()
-      }
+      property int exitStatus: 0
       // A wedged daemon or socket must not leave a button "busy" forever.
       property bool timedOut: false
       property Timer watchdog: Timer {
         running: proc.running
-        interval: root.commandTimeout(String(proc.args[0]), proc.opts)
+        interval: root.commandTimeout(root.commandName(proc.args), proc.opts)
         onTriggered: { proc.timedOut = true; proc.running = false }
       }
       stdinEnabled: opts.stdin === true
@@ -228,13 +221,13 @@ Item {
       stderr: SplitParser {
         onRead: function(line) { proc.outLines.push(line) }
       }
-      onExited: root.finish(proc)
+      onExited: function(code) { proc.exitStatus = code; root.finish(proc, code) }
     }
   }
 
   // ── Daemon lifecycle ──────────────────────────────────────────────────
   // Opening the panel refreshes everything, but not more than every 15s:
-  // `ls` is the whole org directory, and the device lists spawn v4l2-ctl and
+  // the device lists spawn v4l2-ctl and
   // pactl. The periodic timer and explicit actions still refresh as needed.
   property double lastRefreshAt: 0
   function refresh(force) {
@@ -252,7 +245,7 @@ Item {
   }
 
   function turnOn() {
-    run(["on"], { onDone: function(reply) { say(reply.ok ? "Tuple is on" : reply.message, !reply.ok); probe.running = true } })
+    run(["start"], { onDone: function(reply) { say(reply.ok ? "Tuple is on" : reply.message, !reply.ok); probe.running = true } })
   }
 
   // ── Demo data (for screenshots / UI work without an account) ───────────
@@ -275,13 +268,14 @@ Item {
     auth = scenario === "login" ? 0 : 1
     loginUrl = scenario === "login" ? "https://production.tuple.app/start?code_challenge=demo&os=linux" : ""
     loginPending = scenario === "login"
-    contacts = Model.parseContacts(
-      "  101 Alice Smith <alice@example.com> [available] (favorite)\n"
-      + "  102 Bob Jones <bob@example.com> [offline] (favorite)\n"
-      + "  103 Carol Diaz <carol@example.com> [in call] (favorite)\n"
-      + "  104 Dev Patel <dev@example.com> [available] (favorite)\n"
-      + "  105 Erin Park <erin@example.com> [unavailable] (favorite)\n"
-      + "  106 Femi Ade <femi@example.com> [offline]\n")
+    contacts = Model.parseContacts(JSON.stringify([
+      { id: 101, full_name: "Alice Smith", email: "alice@example.com", status: "online", favorited: true },
+      { id: 102, full_name: "Bob Jones", email: "bob@example.com", status: "offline", favorited: true },
+      { id: 103, full_name: "Carol Diaz", email: "carol@example.com", status: "busy", favorited: true },
+      { id: 104, full_name: "Dev Patel", email: "dev@example.com", status: "online", favorited: true },
+      { id: 105, full_name: "Erin Park", email: "erin@example.com", status: "unknown", favorited: true },
+      { id: 106, full_name: "Femi Ade", email: "femi@example.com", status: "offline", favorited: false }
+    ]))
     contactsLoaded = true
     contactCounts = Model.contactCounts(contacts)
     tupleSettings = Model.parseSettings(
@@ -289,7 +283,7 @@ Item {
       + "start-calls-muted | 0 | Start with microphone muted when joining a call (0|1)\n"
       + "capture | auto | Screen capture mechanism (auto|x11|portal)\n")
     var s = Model.emptyState()
-    s.version = "v2026_09_16.1"
+    s.version = "v2026_11_02.0"
     s.signaler = "connected"
     s.tokenSaved = scenario !== "login"
     if (scenario === "call") { s.call = "active"; s.peers = ["Alice Smith"]; s.sharing = true; muted = true; personalUrl = "https://tuple.app/c/demo-room" }
@@ -300,13 +294,14 @@ Item {
   }
 
   function turnOff() {
-    run(["off"], { onDone: function(reply) { say("Tuple stopped", false); probe.running = true } })
+    run(["stop"], { onDone: function(reply) { say("Tuple stopped", false); probe.running = true } })
   }
 
   function toggleDaemon() { daemon ? turnOff() : turnOn() }
 
   function onDaemonUp() {
     refreshContacts()
+    refreshPersonalUrl()
     refreshSettings()
   }
 
@@ -365,7 +360,7 @@ Item {
   // ── Contacts ──────────────────────────────────────────────────────────
   function refreshContacts() {
     if (!daemon) return
-    run(["ls"], { quiet: true, onDone: function(reply, proc) {
+    run(["contacts", "list", "--format", "json"], { quiet: true, onDone: function(reply, proc) {
       var text = proc.outLines.join("\n")
       if (reply.lines.length < 5 && /not logged in/i.test(text)) { root.auth = 0; root.contacts = []; root.contactsLoaded = false; root._contactsText = ""; return }
       if (!reply.ok && reply.lines.length < 5) { say(reply.message, true); return }
@@ -386,91 +381,64 @@ Item {
   function toggleFavorite(contact) {
     if (!contact) return
     var verb = contact.favorite ? "unfavorite" : "favorite"
-    run([verb, contact.id], { onDone: function(reply) {
+    run(["contacts", verb, contact.email], { onDone: function(reply) {
       say(reply.ok ? (contact.favorite ? "Removed " : "Added ") + contact.name + (contact.favorite ? " from favorites" : " to favorites") : reply.message, !reply.ok)
       root.refreshContacts()
     } })
   }
 
-  // `tuple call` only offers online favorites as a numbered prompt read from
-  // stdin; answer it with the row that matches the chosen contact.
+  // `call start` rings them and exits 0 once they answer, 2 if the call ends first.
   function callContact(contact) {
     if (!contact) return
-    // `tuple call` only lists online favourites: star them first.
-    if (!contact.favorite) {
-      run(["favorite", contact.id], { onDone: function(reply) {
-        if (!reply.ok) { say(reply.message, true); return }
-        var starred = Object.assign({}, contact, { favorite: true })
-        root.refreshContacts()
-        root.callContact(starred)
-      } })
-      return
-    }
-    var answered = false
-    var choices = []
-    var proc = run(["call"], {
-      stdin: true,
-      onLine: function(line, p) {
-        var parsed = Model.parseCallChoices(line)
-        if (parsed.length > 0) {
-          choices = choices.concat(parsed)
-          p.answerTimer.restart()
-        } else if (answered) {
-          root.actionStatus = line.trim()
-        }
-      },
-      onDone: function(reply) {
-        if (!answered) say(/no favorites online/i.test(reply.message) ? contact.name + " isn't online" : reply.message, true)
-        else say(reply.message, !reply.ok)
+    var proc = run(["call", "start", contact.email], {
+      onDone: function(reply, p) {
+        root.log = Model.finishOutgoing(root.log, p.exitStatus === 0)
+        if (p.exitStatus === 2) say(contact.name + " didn't answer", true)
+        else say(reply.ok ? "Pairing with " + contact.name : reply.message, !reply.ok)
       }
     })
     if (!proc) return
-    proc.answer = function() {
-      if (answered) return
-      answered = true
-      var choice = Model.choiceForContact(choices, contact)
-      if (!choice) {
-        proc.write("\n")
-        proc.running = false
-        say(contact.name + " must be an online favorite to call", true)
-        return
-      }
-      proc.write(choice.index + "\n")
-      say("Calling " + contact.name + "…", false)
-    }
+    log = Model.startOutgoing(log)
+    say("Calling " + contact.name + "…", false)
   }
 
   // ── Calls ─────────────────────────────────────────────────────────────
+  // A new call is your personal room; its URL comes from `rooms list`.
+  function refreshPersonalUrl(then) {
+    run(["rooms", "list", "--format", "json"], { quiet: true, onDone: function(reply, proc) {
+      var url = reply.ok ? Model.parsePersonalUrl(proc.outLines.join("\n")) : ""
+      if (url !== "") root.personalUrl = url
+      if (then) then(url, reply)
+    } })
+  }
+
   function newCall() {
-    run(["new"], {
-      onLine: function(line) {
-        var url = Model.parsePersonalUrl(line)
-        if (url !== "") {
-          root.personalUrl = url
-          if (root.setting("copyLinkOnNewCall", true) !== false) {
-            root.copy(url, "Call link")
-            root.personalUrlCopied(url)
-          }
-        } else if (line.trim() !== "") {
-          root.actionStatus = line.trim()
-        }
-      },
-      onDone: function(reply) {
-        if (!reply.ok) say(reply.message, true)
-        else if (root.personalUrl !== "") say("Call link copied — share it to pair", false)
-        else say(reply.message, false)
-      }
-    })
+    if (personalUrl === "") {
+      refreshPersonalUrl(function(url, reply) {
+        if (url !== "") root.newCall()
+        else say(reply.ok ? "Tuple has no personal room for you" : reply.message, true)
+      })
+      return
+    }
+    if (setting("copyLinkOnNewCall", true) !== false) {
+      copy(personalUrl, "Call link")
+      personalUrlCopied(personalUrl)
+    }
+    startingCall = true
+    run(["call", "join", personalUrl], { onDone: function(reply) {
+      root.startingCall = false
+      say(reply.ok ? "Call link copied — share it to pair" : reply.message, !reply.ok)
+    } })
   }
 
   function join(url) {
     var u = Model.extractCallUrl(url) || String(url || "").trim()
     if (!Model.isCallUrl(u)) { say("That isn't a Tuple call link (https://tuple.app/c/…)", true); return }
-    run(["join", u], { onLine: function(line) { if (line.trim() !== "") root.actionStatus = line.trim() } })
+    run(["call", "join", u], { onLine: function(line) { if (line.trim() !== "") root.actionStatus = line.trim() } })
   }
 
   function setMuted(on) {
-    run([on ? "mute" : "unmute"], { onDone: function(reply) {
+    run(["call", on ? "mute" : "unmute"], { onDone: function(reply) {
       if (reply.ok || /^already/i.test(reply.message)) root.muted = on
       say(reply.ok ? (on ? "Microphone muted" : "Microphone live") : reply.message, !reply.ok)
     } })
@@ -487,16 +455,11 @@ Item {
   function toggleShare() { setSharing(!sharing) }
 
   function endCall() {
-    run(["end"], { onDone: function(reply) { say(reply.ok ? "Call ended" : reply.message, !reply.ok) } })
+    run(["call", "leave"], { onDone: function(reply) { say(reply.ok ? "Call ended" : reply.message, !reply.ok) } })
   }
 
-  // Tuple's own prompt owns answering; the CLI only exposes "end" to decline.
-  // Bring its incoming-call window forward, or the debug UI if there's none.
   function answer() {
-    Quickshell.execDetached(["bash", "-c",
-      "hyprctl clients -j | jq -e '.[] | select(.title == \"tuple-incoming-call\")' >/dev/null "
-      + "&& exec hyprctl dispatch 'hl.dsp.focus({ window = \"title:^tuple-incoming-call$\" })'; "
-      + "PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\"; exec " + Util.shellQuote(String(setting("tupleCommand", "tuple"))) + " ui"])
+    run(["call", "accept"], { onDone: function(reply) { say(reply.ok ? "Call accepted" : reply.message, !reply.ok) } })
   }
 
   // Their shared screen is Tuple's "screen" window (named by tuple-windows).
@@ -737,14 +700,8 @@ Item {
   }
 
   Process {
-    running: true
-    command: ["bash", "-c", "command -v socat >/dev/null"]
-    onExited: function(code) { root.socatAvailable = code === 0 }
-  }
-
-  Process {
     id: probe
-    command: ["grep", "-qs", "@tuple-daemon", "/proc/net/unix"]
+    command: ["grep", "-qsE", "@tuple-daemon|/tuple-0$", "/proc/net/unix"]
     onExited: function(code) {
       if (root.demo !== "") return
       var up = code === 0
@@ -793,6 +750,24 @@ Item {
 
   Timer { id: followerRestart; interval: 3000; onTriggered: follower.running = true }
 
+  // Mute and call end, from the daemon's own state stream (v2026_11 and later).
+  Process {
+    id: stateFollower
+    running: root.daemon && root.demo === ""
+    command: root.tupleArgv(["state", "follow", "--format", "json"])
+    stdout: SplitParser {
+      onRead: function(line) {
+        var summary = Model.parseJson(line, null)
+        if (!summary || summary.in_call === undefined) return
+        if (summary.call) root.muted = summary.call.muted === true
+        root.log = Model.applySummary(root.log, summary)
+      }
+    }
+    onExited: if (root.daemon) stateFollowerRestart.restart()
+  }
+
+  Timer { id: stateFollowerRestart; interval: 3000; onTriggered: stateFollower.running = root.daemon && root.demo === "" }
+
   // Log times are UTC; replays on shell start shouldn't trigger side effects.
   function isLive(entry) {
     var d = new Date()
@@ -819,7 +794,7 @@ Item {
         (joinedId !== "" ? peerName(joinedId) : "Someone") + " joined", "You're pairing now."])
     }
     if (next.everyoneLeft && !before.everyoneLeft && isLive(entry)) {
-      notifyAction("Everyone left", "Your call is still open. End it?", "normal", "End call", tupleArgv(["end"]))
+      notifyAction("Everyone left", "Your call is still open. End it?", "normal", "End call", tupleArgv(["call", "leave"]))
     }
     if (next.tokenSaved && !before.tokenSaved) auth = 1
     if (Model.isSignalerOnline(next.signaler) && !Model.isSignalerOnline(before.signaler)) {

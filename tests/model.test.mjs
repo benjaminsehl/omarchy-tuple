@@ -50,7 +50,13 @@ test("parseReply flags daemon errors", () => {
 test("login + personal url", () => {
   const login = `----\nTuple Login Instructions:\n----\nIf your browser does not open automatically, go to the following URL and login:\n\n    https://production.tuple.app/start?code_challenge=abc&onboarding_origin=app&os=linux\n\nAfter logging in, copy the "authorization code" and run:\n\n    tuple auth AUTHORIZATION_CODE\n`
   assert.equal(M.parseLoginUrl(login), "https://production.tuple.app/start?code_challenge=abc&onboarding_origin=app&os=linux")
-  assert.equal(M.parsePersonalUrl("starting new call with personal url...\npersonal url: https://tuple.app/c/ben-123\n"), "https://tuple.app/c/ben-123")
+  const rooms = JSON.stringify([
+    { slug: "team1", http_value: "https://tuple.app/c/team1", kind: "team" },
+    { slug: "ben-123", http_value: "https://tuple.app/c/ben-123", kind: "personal" }
+  ])
+  assert.equal(M.parsePersonalUrl(rooms), "https://tuple.app/c/ben-123")
+  assert.equal(M.parsePersonalUrl("[]"), "")
+  assert.equal(M.parsePersonalUrl("error: not logged in"), "")
 })
 
 test("call urls", () => {
@@ -62,20 +68,30 @@ test("call urls", () => {
   assert.equal(M.extractCallUrl("<https://tuple.app/c/x>"), "https://tuple.app/c/x")
 })
 
-test("contacts + call choices (format from binary strings)", () => {
-  const ls = `  101 Alice Smith <alice@x.com> [online] (favorite)\n  102 Bob <bob@x.com> [offline]\n  103 Carol <carol@x.com> [online]\n`
-  const c = M.parseContacts(ls)
-  assert.deepEqual([...c.map((x) => x.name)], ["Alice Smith", "Carol", "Bob"])
+// Shape of `tuple contacts list --format json` from v2026_11_02.0.
+const contactsJson = (rows) => JSON.stringify(rows.map(([id, full_name, email, status, favorited]) =>
+  ({ id, email, full_name, short_name: full_name.split(" ")[0], kind: "teammate", favorited, recent: false, status })))
+
+test("contacts", () => {
+  const c = M.parseContacts(contactsJson([
+    [101, "Alice Smith", "alice@x.com", "online", true],
+    [102, "Bob", "bob@x.com", "offline", false],
+    [103, "Carol", "carol@x.com", "online", false],
+    [104, "Dan", "dan@x.com", "unknown", true]
+  ]))
+  assert.deepEqual([...c.map((x) => x.name)], ["Alice Smith", "Carol", "Dan", "Bob"])
   assert.equal(c[0].favorite, true)
   assert.equal(c[0].online, true)
+  assert.equal(c[0].id, "101")
+  assert.equal(c[0].email, "alice@x.com")
+  assert.equal(c[2].name, "Dan")
   assert.equal(c[2].online, false)
-  const choices = M.parseCallChoices("  1) Alice Smith <alice@x.com>\n  2) Dan <dan@x.com>\nenter a number: ")
-  assert.equal(choices.length, 2)
-  assert.equal(M.choiceForContact(choices, c[0]).index, 1)
-  assert.equal(M.choiceForContact(choices, c[1]), null)
+  assert.equal(M.parseContacts("error: not logged in").length, 0)
   assert.equal(M.initials("Alice Smith"), "AS")
   assert.equal(M.presenceLabel("available"), "")
   assert.equal(M.presenceLabel("in call"), "In a call")
+  assert.equal(M.presenceLabel("busy"), "In a call")
+  assert.equal(M.presenceLabel("unknown"), "")
   assert.equal(M.presenceLabel("offline"), "")
   assert.equal(M.presenceLabel("unavailable"), "")
 })
@@ -128,9 +144,12 @@ test("reduceReply", () => {
   s.call = "active"
   s = M.reduceReply(s, "share", M.parseReply("screen share initiated\n"))
   assert.equal(s.sharing, true)
-  s = M.reduceReply(s, "mute", M.parseReply("can't mute, not in a call\n"))
+  s = M.reduceReply(s, "call mute", M.parseReply("no longer available (HTTP 410)\n"))
   assert.equal(s.call, "idle")
   assert.equal(s.sharing, false)
+  s.call = "active"
+  s = M.reduceReply(s, "call leave", { ok: true, message: "", lines: [] })
+  assert.equal(s.call, "idle")
 })
 
 test("statusLabel", () => {
@@ -143,12 +162,12 @@ test("statusLabel", () => {
 
 test("large directories: featured + search stay bounded", () => {
   const rows = []
-  for (let i = 0; i < 8000; i++) rows.push(`  ${1000 + i} Person ${i} <person${i}@example.com> [offline]`)
-  rows.push("  9 Zed Fave <zed@example.com> [offline] (favorite)")
-  rows.push("  8 Amy Here <amy@example.com> [available]")
-  rows.push("  7 Uma Busy <uma@example.com> [unavailable]")
+  for (let i = 0; i < 8000; i++) rows.push([1000 + i, `Person ${i}`, `person${i}@example.com`, "offline", false])
+  rows.push([9, "Zed Fave", "zed@example.com", "offline", true])
+  rows.push([8, "Amy Here", "amy@example.com", "available", false])
+  rows.push([7, "Uma Busy", "uma@example.com", "unavailable", false])
   const t0 = Date.now()
-  const all = M.parseContacts(rows.join("\n"))
+  const all = M.parseContacts(contactsJson(rows))
   assert.ok(Date.now() - t0 < 500, "parse 8k rows quickly")
   assert.equal(all.length, 8003)
   const featured = M.featuredContacts(all, 30)
@@ -357,4 +376,23 @@ test("incoming call: id isn't a caller, prompt holds until answered", () => {
   assert.deepEqual([...accepted.peers], ["115309"])
   const rejected = M.reduceLogText(at("19:32:18.011", "resolving incoming call: reject"), s)
   assert.equal(rejected.call, "idle")
+})
+
+test("state follow summary ends a call the log missed", () => {
+  const active = { ...M.emptyState(), call: "active", peers: ["162751"] }
+  assert.equal(M.applySummary(active, { in_call: false, call: null }).call, "idle")
+  assert.equal(M.applySummary(active, { in_call: true, call: { muted: true } }), active)
+  const ringing = { ...M.emptyState(), call: "incoming" }
+  assert.equal(M.applySummary(ringing, { in_call: false, call: null }), ringing)
+})
+
+test("call start: ringing, then answered or not", () => {
+  const ringing = M.startOutgoing(M.emptyState())
+  assert.equal(ringing.call, "connecting")
+  assert.equal(ringing.outgoing, true)
+  assert.equal(M.applySummary(ringing, { in_call: false, call: null }), ringing)
+  assert.equal(M.finishOutgoing(ringing, true).call, "active")
+  assert.equal(M.finishOutgoing(ringing, false).call, "idle")
+  const busy = { ...M.emptyState(), call: "active" }
+  assert.equal(M.startOutgoing(busy), busy)
 })
