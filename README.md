@@ -1,7 +1,7 @@
 # Tuple for Omarchy
 
 A native [Omarchy](https://omarchy.org) bar widget and panel for
-[Tuple's Linux client](https://tuple.app/linux/) (alpha, v2026_09_16.1). Tuple
+[Tuple's Linux client](https://tuple.app/linux/) (alpha, v2026_11_02.0). Tuple
 for Linux is a command-line tool; this gives it a home in your bar. It's built
 with the same Quickshell UI kit as Omarchy's own Tailscale, Bluetooth and Audio
 panels, so it picks up your theme, fonts, borders and keyboard conventions.
@@ -106,7 +106,8 @@ log), so the panel posts them instead:
 ## Reliability
 
 - **No stuck buttons:** every `tuple` command has a time limit (20s for most,
-  45s for `ls`/`settings`/`on`/`off`, 90s for login, 120s for `call`). A
+  45s for `contacts list`/`settings`/`start`/`stop`, 90s for login, 120s for
+  `call start`). A
   wedged daemon shows an error and frees the button.
 - **No leaked helpers:** the log follower and the mic router exit together
   with their child processes (`tail --pid`, and a process substitution with
@@ -146,7 +147,7 @@ isn't changed. Saved as `micDevice`; blank means system default.
 - Omarchy with the Quickshell-based shell (`omarchy-shell`)
 - The Tuple CLI from [tuple.app/linux](https://tuple.app/linux/) on your
   `PATH`; `~/.local/bin` and `~/bin` are checked too
-- `socat`, `jq`, `hyprctl`, `wl-copy` and `notify-send`
+- `jq`, `hyprctl`, `wl-copy` and `notify-send`
 - For the camera overlay: `mpv` and `v4l2-ctl`. For mic selection: `pactl`. Omarchy ships these.
 
 ## Install
@@ -217,18 +218,16 @@ o.bind("SUPER + CTRL + M", "Tuple mute", "omarchy-shell sehl.tuple toggleMute")
 These findings come from capturing traffic on the CLI's socket and from the
 binary's strings. They are the basis of `Model.js`.
 
-- **Thin CLI:** `tuple` is one static binary. Each invocation is a thin
-  client: it connects to the **abstract unix socket `@tuple-daemon`**, sends
-  its argv framed as `u64 len, u64 argc, "arg\0arg\0…"`, forwards stdin, and
-  prints the plain text the daemon streams back until EOF.
-- **Auto-start:** any command, even `tuple help`, spawns the daemon if none is
-  listening. That's why the widget checks `/proc/net/unix` for
-  `@tuple-daemon` and never runs a command while the daemon is off.
-- **Truncated replies:** the daemon writes replies with non-blocking sends and
-  drops the rest on `EAGAIN` (`write to deferred ls pipe failed, error=11`).
-  The stock CLI drains too slowly, so `tuple ls` returns only ~71 of ~7,800
-  people. `bin/tuple-request` speaks the socket protocol through `socat` and
-  gets everything; the widget uses it for `ls` and `settings`.
+- **Daemon socket:** since v2026_11_02.0 the daemon listens on
+  `$XDG_RUNTIME_DIR/tuple-0`. Earlier versions used the abstract socket
+  `@tuple-daemon`. The widget checks `/proc/net/unix` for either one and
+  never runs a command while the daemon is off.
+- **Grouped commands:** v2026_11_02.0 replaced most of the flat commands.
+  The widget uses `start`, `stop`, `contacts list|favorite|unfavorite`,
+  `call start|join|accept|mute|unmute|leave` and `rooms list`. These commands
+  report errors through a non-zero exit code, so the widget checks it.
+  `share`, `unshare`, `settings`, `set` and `ui` are deprecated but have no
+  replacement yet, so the widget still uses them.
 - **No status API:** there is no status or JSON command. Live state comes from
   the daemon log at `~/.local/share/tuple/<n>/log.txt`, which is truncated on
   every start and formatted `time|pid|tid|level|[File.cpp:N|]message`. The
@@ -238,7 +237,7 @@ binary's strings. They are the basis of `Model.js`.
   - `peer joined call: X` and `peer left call: X`
   - `call connected`
   - `EngineEvent: OnPeerAdded/OnPeerRemoved (peer <contact id> …)`, mapped to
-    names from `ls`
+    names from `contacts list`
   - `OnVideoCapturerDesktop Start/Stop` (your screen share)
   - `webcam: added feed` and `WebcamReceivingChange` (their webcam)
   - `cli: end`, then `call ended`, a remote hang-up, or the call's audio
@@ -251,17 +250,16 @@ binary's strings. They are the basis of `Model.js`.
   `~/.local/state/omarchy-tuple/logs/`, which is what the parser is
   calibrated against.
 - **Command output:**
-  - `tuple ls` prints `  ID Name <email> [available|unavailable|in call|offline]( (favorite))`.
-  - `tuple call` prints the online favourites as `  N) Name <email>` and reads
-    the chosen number from stdin. The panel answers that prompt for the person
-    you clicked.
-  - `tuple new` prints `personal url: https://tuple.app/c/…`.
+  - `tuple contacts list --format json` prints an array of
+    `{ id, email, full_name, status, favorited }`. The status is `online`,
+    `busy`, `offline` or `unknown`.
+  - `tuple rooms list --format json` includes your personal room. **New call**
+    joins that room and copies its link.
   - `tuple settings` prints `name | value | description (a|b)`.
 - **Call links:** `join` only accepts `https://tuple.app/c/…` or
   `https://production.tuple.app/c/…` links.
 - **Tuple's own window:** `tuple ui` opens an X11 window that only shows a few
-  lines of status text. It's the only place to accept an incoming call, so the
-  Answer button opens it.
+  lines of status text. Answer uses `tuple call accept`.
 
 ## Known gaps (alpha client)
 
@@ -273,16 +271,11 @@ binary's strings. They are the basis of `Model.js`.
   stage with a real peer webcam, the Their screen row and mic routing haven't
   been seen live yet. `omarchy-shell sehl.tuple
   status` shows what the widget currently believes.
-- **Calling restrictions:** `tuple call` only offers online favourites. The
-  call button works for anyone who's online: for someone who isn't a
-  favourite, it stars them first, and the tooltip says so. Clicking the row
-  itself only rings favourites, so a stray click can't ring someone new.
-- **Ringing:** `tuple call` adds the callee as a peer before they answer. The
-  widget shows "Calling X…" until `call connected` (or the call's audio
-  context) appears. If nobody answers in ~25s, the engine logs
-  `OnPeerRemoved (… reason=timeout)`, and the widget tells you they didn't
-  answer. A call that's answered has only been seen through call links. If a
-  direct call doesn't connect, use **New call** and send the link.
+- **Not verified on v2026_11_02.0:** the grouped commands don't write
+  `cli: …` lines to the log. Call state still comes from the log, so the
+  outgoing-call states ("Calling X…", "didn't answer") and the ending grace
+  period may not trigger. `call start` exits 2 when the call ends before the
+  callee answers, and the widget reports that as no answer.
 
 ## Develop
 
@@ -298,8 +291,6 @@ Files:
   overlay.
 - `Panel.qml`: the bar button and panel UI.
 - `TupleIcon.qml`: the logo.
-- `bin/tuple-request`: talks to the daemon socket directly, for complete
-  replies and without starting the daemon.
 - `bin/tuple-windows`: names Tuple's X11 windows, centres its prompts, and
   lays out the camera stage.
 - `bin/tuple-selfcam`: your camera as a square, mirrored tile.

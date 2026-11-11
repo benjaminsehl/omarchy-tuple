@@ -442,7 +442,7 @@ Panel {
                     visible: tuple.installed
                     anchors.verticalCenter: parent.verticalCenter
                     checked: tuple.daemon
-                    busy: tuple.isPending("on") || tuple.isPending("off")
+                    busy: tuple.isPending("start") || tuple.isPending("stop")
                     hasCursor: header.ringVisible
                     foreground: hero.foreground
                     onHovered: function(on) { if (on) root.hover("daemon") }
@@ -649,7 +649,7 @@ Panel {
                 menuOpen: deviceMenu.opened && deviceMenu.kind === "mic"
                 onMenuRequested: root.openDeviceMenu("mic", micTile)
                 checked: tuple.muted
-                busy: tuple.isPending("mute") || tuple.isPending("unmute")
+                busy: tuple.isPending("call mute") || tuple.isPending("call unmute")
                 onActivated: tuple.toggleMute()
               }
               ControlTile {
@@ -685,7 +685,7 @@ Panel {
                 navKey: "end"; width: parent.tileWidth
                 glyph: "󰏵"; label: "End"; alert: true
                 tooltip: "End call (e)"
-                busy: tuple.isPending("end")
+                busy: tuple.isPending("call leave")
                 onActivated: tuple.endCall()
               }
             }
@@ -736,8 +736,8 @@ Panel {
               id: pairButton
               // With a link in the field, Join is the one thing to do: the orange key.
               primary: root.joinable && !working
-              readonly property bool working: tuple.isPending("new") || tuple.isPending("join")
-              text: tuple.isPending("join") ? "Joining…" : (tuple.isPending("new") ? "Starting…" : (root.joinable ? "Join" : "New call"))
+              readonly property bool working: tuple.isPending("call join") || tuple.isPending("rooms list")
+              text: tuple.startingCall ? "Starting…" : (working ? "Joining…" : (root.joinable ? "Join" : "New call"))
               tooltipText: root.joinable ? "Join this call" : "Start a call and copy its link (n)"
               selected: root.hasCursor("pair")
               fontFamily: root.fontFamily
@@ -1271,8 +1271,6 @@ Panel {
     id: contactRow
     property var contact: null
     readonly property string navKey: contact ? "contact:" + contact.id : ""
-    // Tuple for Linux can only ring favourites; calling someone else stars
-    // them first (Service.callContact).
     readonly property bool callable: contact && contact.online && !tuple.inCall && !tuple.incoming
     readonly property bool revealed: hasCursor || rowMouse.containsMouse
     readonly property string presence: contact ? Model.presenceLabel(contact.status) : ""
@@ -1286,11 +1284,9 @@ Panel {
       id: rowMouse
       anchors.fill: parent
       hoverEnabled: true
-      // A click on the row only rings favourites; anyone else takes the
-      // explicit call button (which stars them first).
-      cursorShape: contactRow.callable && contactRow.contact.favorite ? Qt.PointingHandCursor : Qt.ArrowCursor
+      cursorShape: contactRow.callable ? Qt.PointingHandCursor : Qt.ArrowCursor
       onEntered: root.hover(contactRow.navKey)
-      onClicked: if (contactRow.callable && contactRow.contact.favorite) tuple.callContact(contactRow.contact)
+      onClicked: if (contactRow.callable) tuple.callContact(contactRow.contact)
     }
 
     RowLayout {
@@ -1341,9 +1337,9 @@ Panel {
       PanelActionButton {
         visible: contactRow.revealed
         iconText: "󰏲"
-        tooltipText: contactRow.callable ? (contactRow.contact.favorite ? "Call" : "Call (adds them to your favorites — Tuple for Linux only calls favorites)")
+        tooltipText: contactRow.callable ? "Call"
           : (tuple.inCall ? "You're already in a call" : "Not available")
-        enabled: contactRow.callable && !tuple.isPending("call")
+        enabled: contactRow.callable && !tuple.isPending("call start")
         foreground: root.foreground
         fontFamily: root.fontFamily
         Layout.alignment: Qt.AlignVCenter
