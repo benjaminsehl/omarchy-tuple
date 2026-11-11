@@ -377,3 +377,22 @@ test("incoming call: id isn't a caller, prompt holds until answered", () => {
   const rejected = M.reduceLogText(at("19:32:18.011", "resolving incoming call: reject"), s)
   assert.equal(rejected.call, "idle")
 })
+
+test("state follow summary ends a call the log missed", () => {
+  const active = { ...M.emptyState(), call: "active", peers: ["162751"] }
+  assert.equal(M.applySummary(active, { in_call: false, call: null }).call, "idle")
+  assert.equal(M.applySummary(active, { in_call: true, call: { muted: true } }), active)
+  const ringing = { ...M.emptyState(), call: "incoming" }
+  assert.equal(M.applySummary(ringing, { in_call: false, call: null }), ringing)
+})
+
+test("call start: ringing, then answered or not", () => {
+  const ringing = M.startOutgoing(M.emptyState())
+  assert.equal(ringing.call, "connecting")
+  assert.equal(ringing.outgoing, true)
+  assert.equal(M.applySummary(ringing, { in_call: false, call: null }), ringing)
+  assert.equal(M.finishOutgoing(ringing, true).call, "active")
+  assert.equal(M.finishOutgoing(ringing, false).call, "idle")
+  const busy = { ...M.emptyState(), call: "active" }
+  assert.equal(M.startOutgoing(busy), busy)
+})

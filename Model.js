@@ -485,6 +485,31 @@ function resolveStaleOutgoing(state) {
   var s = cloneState(state); endCall(s); return s
 }
 
+// One line of `tuple state follow --format json`: { in_call, call: { muted, … } }.
+// The log has no line for every end (e.g. a leave from another client), so a
+// summary with in_call false ends any call that isn't ringing.
+function applySummary(state, summary) {
+  if (!summary || summary.in_call !== false) return state
+  if (state.call === "idle" || state.call === "incoming" || (state.outgoing && state.call === "connecting")) return state
+  var s = cloneState(state); endCall(s); return s
+}
+
+// `call start` rings someone; the log no longer records it.
+function startOutgoing(state) {
+  var s = cloneState(state || emptyState())
+  if (s.call !== "idle") return state
+  s.call = "connecting"; s.outgoing = true; s.unanswered = ""; s.peers = []
+  return s
+}
+
+// `call start` exited: 0 means they answered, anything else means no call.
+function finishOutgoing(state, answered) {
+  if (!state.outgoing) return state
+  var s = cloneState(state)
+  if (answered) connectOutgoing(s); else endCall(s)
+  return s
+}
+
 function reduceLogText(text, state) {
   var s = state || emptyState()
   var all = lines(text)

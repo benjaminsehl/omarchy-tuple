@@ -392,11 +392,14 @@ Item {
     if (!contact) return
     var proc = run(["call", "start", contact.email], {
       onDone: function(reply, p) {
+        root.log = Model.finishOutgoing(root.log, p.exitStatus === 0)
         if (p.exitStatus === 2) say(contact.name + " didn't answer", true)
         else say(reply.ok ? "Pairing with " + contact.name : reply.message, !reply.ok)
       }
     })
-    if (proc) say("Calling " + contact.name + "…", false)
+    if (!proc) return
+    log = Model.startOutgoing(log)
+    say("Calling " + contact.name + "…", false)
   }
 
   // ── Calls ─────────────────────────────────────────────────────────────
@@ -746,6 +749,24 @@ Item {
   }
 
   Timer { id: followerRestart; interval: 3000; onTriggered: follower.running = true }
+
+  // Mute and call end, from the daemon's own state stream (v2026_11 and later).
+  Process {
+    id: stateFollower
+    running: root.daemon && root.demo === ""
+    command: root.tupleArgv(["state", "follow", "--format", "json"])
+    stdout: SplitParser {
+      onRead: function(line) {
+        var summary = Model.parseJson(line, null)
+        if (!summary || summary.in_call === undefined) return
+        if (summary.call) root.muted = summary.call.muted === true
+        root.log = Model.applySummary(root.log, summary)
+      }
+    }
+    onExited: if (root.daemon) stateFollowerRestart.restart()
+  }
+
+  Timer { id: stateFollowerRestart; interval: 3000; onTriggered: stateFollower.running = root.daemon && root.demo === "" }
 
   // Log times are UTC; replays on shell start shouldn't trigger side effects.
   function isLive(entry) {
